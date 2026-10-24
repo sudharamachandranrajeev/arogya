@@ -1,0 +1,14 @@
+# Production-style: PostgreSQL + Arogya. Set AROGYA_ADMIN_PASSWORD (12+ chars) before first start.
+services:
+  db:
+    image: postgres:17-alpine
+    environment: { POSTGRES_PASSWORD: change-me, POSTGRES_DB: arogya }
+    volumes: [pgdata:/var/lib/postgresql/data]
+  arogya:
+    build: .
+    depends_on: [db]
+    environment:
+      DATABASE_URL: postgres://postgres:change-me@db:5432/arogya
+      AROGYA_ADMIN_PASSWORD: ${AROGYA_ADMIN_PASSWORD:?set a 12+ character admin password}
+    ports: ["8080:8080"]
+volumes: { pgdata: {} }

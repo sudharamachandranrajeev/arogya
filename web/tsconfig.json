@@ -1,0 +1,7 @@
+{
+  "compilerOptions": {
+    "target": "esnext", "module": "esnext", "moduleResolution": "bundler", "jsx": "react-jsx",
+    "strict": true, "noEmit": true, "allowImportingTsExtensions": true, "skipLibCheck": true, "lib": ["esnext", "dom"], "types": []
+  },
+  "include": ["src", "vite.config.ts", "vite-env.d.ts"]
+}

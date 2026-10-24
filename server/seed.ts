@@ -1,0 +1,98 @@
+import type { Db } from './db.ts';
+import { createUser } from './auth.ts';
+import { afterWrite, beforeWrite } from './domain.ts';
+import { create } from './fhir/store.ts';
+import { localIso } from './scheduling.ts';
+
+export const DEMO_PASSWORD = 'arogya-demo-2026';
+
+/** Deterministic synthetic data only: no real person is represented. */
+function rng(seed: number) { return () => (seed = (seed * 1664525 + 1013904223) % 4294967296) / 4294967296; }
+
+const FAMILY = ['Nair', 'Menon', 'Okafor', 'Silva', 'Haddad', 'Kowalski', 'Tanaka', 'Murphy', 'Singh', 'Garcia', 'Lindqvist', 'Mwangi', 'Rahman', 'Dubois', 'Costa'];
+const GIVEN = ['Asha', 'Ravi', 'Chidi', 'Maria', 'Omar', 'Anna', 'Kenji', 'Aoife', 'Priya', 'Luis', 'Elsa', 'Wanjiru', 'Imran', 'Claire', 'Tiago'];
+const SERVICES = ['Continence', 'Diabetes review', 'Physiotherapy', 'Respiratory'];
+
+const LAB = { loinc: 'http://loinc.org' };
+
+export async function seed(db: Db) {
+  const u: Record<string, string> = {};
+  for (const [username, role, name] of [['admin', 'admin', 'Alex Admin'], ['mehta', 'clinician', 'Dr Sunita Mehta'], ['osei', 'clinician', 'Dr Kwame Osei'], ['nurse', 'nurse', 'Nia Nurse'], ['reception', 'reception', 'Rory Reception'], ['manager', 'manager', 'Mina Manager'], ['biller', 'biller', 'Bo Biller']] as const) {
+    let pid: string | undefined;
+    if (username === 'mehta' || username === 'osei') {
+      pid = (await create(db, "Practitioner", { resourceType: "Practitioner", name: [{ text: name, family: name.split(" ").pop() }], active: true })).id as string;
+      u[username] = pid;
+    }
+    await createUser(db, { username, role, name, password: DEMO_PASSWORD, practitionerId: pid });
+  }
+  const R = rng(42);
+  const pick = <T,>(a: T[]) => a[Math.floor(R() * a.length)];
+  const now = Date.now();
+  const system = { reception: { id: 'seed', role: 'admin' } } as any;
+  const ref = (t: string, id: string) => ({ reference: `${t}/${id}` });
+
+  const patients: Array<{ id: string; name: string }> = [];
+  for (let i = 0; i < 40; i++) {
+    const family = pick(FAMILY), given = pick(GIVEN);
+    const born = new Date(now - (20 + Math.floor(R() * 65)) * 365 * 86400_000);
+    const p = await create(db, 'Patient', {
+      resourceType: 'Patient', active: true, name: [{ family, given: [given], text: `${given} ${family}` }],
+      gender: pick(['male', 'female']), birthDate: born.toISOString().slice(0, 10),
+      identifier: [{ system: 'urn:arogya:mrn', value: `A${String(100000 + i)}` }],
+      telecom: [{ system: 'phone', value: `07${String(Math.floor(R() * 1e9)).padStart(9, '0')}` }],
+      ...(i === 0 ? { meta: { security: [{ system: 'http://terminology.hl7.org/CodeSystem/v3-Confidentiality', code: 'R' }] } } : {}),
+    });
+    patients.push({ id: p.id, name: `${given} ${family}` });
+  }
+
+  for (let i = 0; i < 40; i++) {
+    const p = patients[i];
+    const subject = { reference: `Patient/${p.id}`, display: p.name };
+    if (i % 5 === 0) await create(db, 'AllergyIntolerance', { resourceType: 'AllergyIntolerance', clinicalStatus: { coding: [{code: 'active'}] }, code: { text: 'Penicillin' }, patient: subject, criticality: 'high' });
+    if (i % 3 === 0) await create(db, 'Condition', { resourceType: 'Condition', clinicalStatus: { coding: [{ code: 'active' }] }, code: { text: pick(['Type 2 diabetes', 'Hypertension', 'Asthma', 'Urinary incontinence']) }, subject });
+    if (i % 4 === 0) await create(db, 'MedicationRequest', { resourceType: 'MedicationRequest', status: 'active', intent: 'order', medicationCodeableConcept: { text: pick(['Ramipril 5 mg', 'Metformin 500 mg', 'Warfarin 3 mg', 'Atorvastatin 20 mg']) }, subject });
+    const hba1c = 38 + Math.floor(R() * 40);
+    const obs = {
+      resourceType: 'Observation', status: 'final', category: [{ coding: [{ code: 'laboratory' }] }], code: { coding: [{ system: LAB.loinc, code: '4548-4', display: 'HbA1c' }], text: 'HbA1c' },
+      subject, effectiveDateTime: new Date(now - R() * 20 * 86400_000).toISOString(), valueQuantity: { value: hba1c, unit: 'mmol/mol' },
+      referenceRange: [{ low: { value: 20 }, high: { value: 48 }, extension: [{ url: 'urn:arogya:critical-high', valueDecimal: 75 }] }],
+      basedOn: undefined as any,
+    };
+    delete obs.basedOn;
+    beforeWrite('Observation', obs);
+    const o = await create(db, 'Observation', obs);
+    await afterWrite(db, 'Observation', o, true, system);
+    await create(db, 'Observation', { resourceType: 'Observation', status: 'final', category: [{ coding: [{ code: 'vital-signs' }] }], code: { coding: [{ system: LAB.loinc, code: '8480-6', display: 'Systolic BP' }], text: 'Systolic BP' }, subject, effectiveDateTime: new Date(now - R() * 30 * 86400_000).toISOString(), valueQuantity: { value: 105 + Math.floor(R() * 60), unit: 'mmHg' } });
+  }
+
+  // Referrals of varied age, some already booked.
+  const sessions = [['mehta', 'Continence', 1], ['mehta', 'Diabetes review', 3], ['osei', 'Respiratory', 2], ['osei', 'Physiotherapy', 4]] as const;
+  for (const [who, service, weekday] of sessions)
+    await db.query('insert into clinic_sessions(id,practitioner_id,service,weekday,start_time,end_time,slot_mins) values ($1,$2,$3,$4,$5,$6,$7)', [crypto.randomUUID(), u[who], service, weekday, '09:00', '13:00', 20]);
+
+  for (let i = 0; i < 25; i++) {
+    const p = patients[i + 5];
+    const ageDays = Math.floor(R() * 150);
+    const sr = {
+      resourceType: 'ServiceRequest', status: 'active', intent: 'order', category: [{ text: 'referral' }],
+      priority: pick(['routine', 'routine', 'routine', 'urgent']), code: { text: pick(SERVICES) },
+      subject: { reference: `Patient/${p.id}`, display: p.name }, authoredOn: new Date(now - ageDays * 86400_000).toISOString(),
+      requester: ref('Practitioner', u.mehta),
+    };
+    beforeWrite('ServiceRequest', sr);
+    const r = await create(db, 'ServiceRequest', sr);
+    await afterWrite(db, 'ServiceRequest', r, true, system);
+  }
+
+  // Past appointment history so DNA risk has something to learn from.
+  for (let i = 0; i < 30; i++) {
+    const p = patients[i];
+    const start = new Date(now - (10 + R() * 200) * 86400_000);
+    start.setHours(9 + Math.floor(R() * 4), 0, 0, 0);
+    await create(db, 'Appointment', {
+      resourceType: 'Appointment', status: R() < 0.15 ? 'noshow' : R() < 0.1 ? 'cancelled' : 'fulfilled',
+      start: localIso(start), end: localIso(new Date(start.getTime() + 20 * 60_000)),
+      participant: [{ actor: { reference: `Patient/${p.id}`, display: p.name }, status: 'accepted' }, { actor: ref('Practitioner', u.mehta), status: 'accepted' }],
+    });
+  }
+}

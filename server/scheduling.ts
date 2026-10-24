@@ -1,0 +1,65 @@
+import { randomUUID } from 'node:crypto';
+import type { Db } from './db.ts';
+import { FhirError, create, patientOf, search } from './fhir/store.ts';
+
+export type Slot = { start: string; end: string; practitionerId: string; service: string; location: string; free: boolean };
+
+const pad = (n: number) => String(n).padStart(2, '0');
+/** Local-time ISO string with offset: clinics run on wall-clock time, so the server TZ is the clinic TZ. */
+export function localIso(d: Date) {
+  const off = -d.getTimezoneOffset();
+  const s = off >= 0 ? '+' : '-';
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}:00${s}${pad(Math.floor(Math.abs(off) / 60))}:${pad(Math.abs(off) % 60)}`;
+}
+
+export async function slots(db: Db, o: { from: Date; days: number; service?: string; practitionerId?: string }): Promise<Slot[]> {
+  const sessions = (await db.query('select * from clinic_sessions where active')).rows
+    .filter((s) => (!o.service || s.service.toLowerCase().includes(o.service.toLowerCase())) && (!o.practitionerId || s.practitioner_id === o.practitionerId));
+  const out: Slot[] = [];
+  const day0 = new Date(o.from.getFullYear(), o.from.getMonth(), o.from.getDate());
+  const taken = new Map<string, Array<[number, number]>>();
+  for (let i = 0; i < o.days; i++) {
+    const day = new Date(day0.getFullYear(), day0.getMonth(), day0.getDate() + i);
+    for (const s of sessions.filter((x) => x.weekday === day.getDay())) {
+      const [sh, sm] = s.start_time.split(':').map(Number);
+      const [eh, em] = s.end_time.split(':').map(Number);
+      for (let m = sh * 60 + sm; m + s.slot_mins <= eh * 60 + em; m += s.slot_mins) {
+        const a = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, m);
+        const b = new Date(a.getTime() + s.slot_mins * 60_000);
+        if (b.getTime() <= Date.now()) continue;
+        const key = `${s.practitioner_id}|${day.toDateString()}`;
+        if (!taken.has(key)) {
+          const date = localIso(day).slice(0, 10);
+          const appts = (await search(db, 'Appointment', { practitioner: s.practitioner_id, date, status: 'booked,pending,arrived,fulfilled', _count: '200' })).resources;
+          taken.set(key, appts.map((x) => [Date.parse(x.start), Date.parse(x.end)]));
+        }
+        const free = !taken.get(key)!.some(([x, y]) => x < b.getTime() && y > a.getTime());
+        out.push({ start: localIso(a), end: localIso(b), practitionerId: s.practitioner_id, service: s.service, location: s.location, free });
+      }
+    }
+  }
+  return out.sort((x, y) => x.start.localeCompare(y.start));
+}
+
+/** Book inside a lock per practitioner so two receptionists can never take the same slot. */
+export async function book(db: Db, b: { patientId: string; practitionerId: string; start: string; end: string; service: string; referralId?: string; reason?: string; patientName?: string }) {
+  const s = Date.parse(b.start), e = Date.parse(b.end);
+  if (!(e > s)) throw new FhirError(422, 'end must be after start');
+  if (s < Date.now()) throw new FhirError(422, 'cannot book in the past');
+  return db.tx(async (t) => {
+    await t.query('select pg_advisory_xact_lock(hashtext($1))', [`appt:${b.practitionerId}`]);
+    const day = b.start.slice(0, 10);
+    const same = (await search(t, 'Appointment', { practitioner: b.practitionerId, date: day, status: 'booked,pending,arrived,fulfilled', _count: '200' })).resources;
+    if (same.some((x) => Date.parse(x.start) < e && Date.parse(x.end) > s)) throw new FhirError(409, 'That slot has just been taken');
+    return create(t, 'Appointment', {
+      resourceType: 'Appointment', status: 'booked', start: b.start, end: b.end, serviceType: [{ text: b.service }],
+      reasonCode: b.reason ? [{ text: b.reason }] : undefined,
+      basedOn: b.referralId ? [{ reference: `ServiceRequest/${b.referralId}` }] : undefined,
+      participant: [
+        { actor: { reference: `Patient/${b.patientId}`, display: b.patientName }, status: 'accepted' },
+        { actor: { reference: `Practitioner/${b.practitionerId}` }, status: 'accepted' },
+      ],
+    }, randomUUID());
+  });
+}
+export { patientOf };
