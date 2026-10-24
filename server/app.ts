@@ -14,6 +14,8 @@ import { SearchError } from './fhir/search.ts';
 import { dismiss, duplicates, LIKELY, merge, person, score, unmerge } from './identity.ts';
 import { kpis } from './kpi.ts';
 import { DEFAULT_RECALLS, recalls, validRules } from './recall.ts';
+import { advance, DEFAULT_REFERRAL_DAYS, outbound, send, type Stage } from './referrals.ts';
+import { reminderSettings, runReminders, saveReminderSettings } from './reminders.ts';
 import { book, dnaRiskMany, slots, today } from './scheduling.ts';
 
 declare module 'fastify' { interface FastifyRequest { user: User | null; token?: string } }
@@ -28,7 +30,7 @@ const POOLS: Record<Role, string[]> = {
 };
 
 const MFA_SETUP_PATHS = new Set(['/api/me', '/api/logout', '/api/account/mfa/start', '/api/account/mfa/confirm', '/api/account/password']);
-const SLA_DAYS: Record<string, number> = { result: 2, message: 2, referral: 5, backfill: 1 };
+const SLA_DAYS: Record<string, number> = { result: 2, message: 2, referral: 5, backfill: 1, chase: 2 };
 
 const outcome = (severity: string, code: string, text: string, extra: object = {}) =>
   ({ resourceType: 'OperationOutcome', issue: [{ severity, code, diagnostics: text }], ...extra });
@@ -366,6 +368,60 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     await log(req, 'patient-unmerge', { type: 'Patient', id: r.keepId, patientId: r.keepId, detail: { restored: r.mergedId } });
     await log(req, 'patient-unmerge', { type: 'Patient', id: r.mergedId, patientId: r.mergedId });
     return r;
+  });
+
+  // ---------- referrals to other providers ----------
+  app.get('/api/referrals-out', async (req) => {
+    need(req, 'clinician', 'nurse', 'reception', 'manager');
+    const list = await outbound(db);
+    await log(req, 'referrals-out-list', { detail: { rows: list.length } });
+    return list;
+  });
+  app.post('/api/referrals-out', async (req, reply) => {
+    const u = need(req, 'clinician', 'nurse');
+    const b = req.body as any;
+    if (!b?.patientId) throw new store.FhirError(400, 'patientId required');
+    await breakGlass(req, b.patientId);
+    const r = await send(db, { ...b, requester: u.practitionerId ?? undefined });
+    await log(req, 'create', { type: 'ServiceRequest', id: r.id, patientId: b.patientId, detail: { to: b.to } });
+    return reply.code(201).send(r);
+  });
+  app.post('/api/referrals-out/:id/stage', async (req) => {
+    const u = need(req, 'clinician', 'nurse', 'reception');
+    const b = req.body as { stage?: Stage; note?: string };
+    const r = await advance(db, (req.params as any).id, b?.stage as Stage, String(b?.note ?? '').trim().slice(0, 500), u.name);
+    await log(req, 'update', { type: 'ServiceRequest', id: r.id, patientId: store.patientOf(r), detail: { stage: b?.stage } });
+    return r;
+  });
+  app.get('/api/settings/referral-days', async () => getSetting(db, 'referralDays', DEFAULT_REFERRAL_DAYS));
+  app.put('/api/settings/referral-days', async (req) => {
+    need(req, 'admin', 'manager');
+    const b = req.body as Record<string, number>;
+    for (const k of Object.keys(DEFAULT_REFERRAL_DAYS)) if (!(Number.isInteger(b?.[k]) && b[k] > 0 && b[k] <= 365)) throw new store.FhirError(422, `${k} must be 1 to 365 days`);
+    await setSetting(db, 'referralDays', Object.fromEntries(Object.keys(DEFAULT_REFERRAL_DAYS).map((k) => [k, b[k]])));
+    await log(req, 'settings-update', { detail: { referralDays: b } });
+    return { ok: true };
+  });
+
+  // ---------- appointment reminders ----------
+  app.get('/api/settings/reminders', async (req) => {
+    need(req, 'admin');
+    const { secret, ...rest } = await reminderSettings(db);
+    return { ...rest, hasSecret: !!secret };
+  });
+  app.put('/api/settings/reminders', async (req) => {
+    need(req, 'admin');
+    const r = await saveReminderSettings(db, req.body as any);
+    const { secret: _s, ...saved } = await reminderSettings(db);
+    await log(req, 'settings-update', { detail: { reminders: { ...saved, rotated: !!r.secret } } });
+    return r;
+  });
+  app.post('/api/admin/reminders/run', async (req) => { need(req, 'admin'); const r = await runReminders(db); await log(req, 'reminders-run', { detail: r }); return r; });
+  app.get('/api/reminders/outbox', async (req) => {
+    need(req, 'admin', 'reception');
+    return (await db.query(
+      `select o.id, o.status, o.detail, o.attempts, o.created_at, o.sent_at, o.to_addr, a.data->>'start' as start, a.data->'participant'->0->'actor'->>'display' as patient
+       from outbox o left join resources a on a.type='Appointment' and a.id=o.appointment_id order by o.created_at desc limit 100`)).rows;
   });
 
   // ---------- recalls ----------

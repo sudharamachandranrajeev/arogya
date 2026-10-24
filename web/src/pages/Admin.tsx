@@ -11,6 +11,7 @@ export function Admin({ user }: { user: User }) {
   const [chain, setChain] = useState<any>(null);
   const [sessions, setSessions] = useState<any[]>([]);
   const [targets, setTargets] = useState<Record<string, number>>({});
+  const [refDays, setRefDays] = useState<Record<string, number>>({});
   const [sec, setSec] = useState<string[]>([]);
   const [pracs, setPracs] = useState<any[]>([]);
   const [nu, setNu] = useState({ username: '', name: '', role: 'clinician', password: '' });
@@ -20,7 +21,7 @@ export function Admin({ user }: { user: User }) {
   const toast = useToast();
   const load = () => {
     get('/api/users').then(setUsers); get('/api/audit?limit=60').then(setAudit); get('/api/clinic-sessions').then(setSessions);
-    get('/api/settings/targets').then(setTargets); get('/api/settings/security').then((s) => setSec(s.mfaRoles));
+    get('/api/settings/targets').then(setTargets); get('/api/settings/referral-days').then(setRefDays); get('/api/settings/security').then((s) => setSec(s.mfaRoles));
     get('/fhir/Practitioner?_count=200').then((b) => setPracs((b.entry ?? []).map((e: any) => e.resource)));
   };
   useEffect(load, []);
@@ -78,6 +79,9 @@ export function Admin({ user }: { user: User }) {
           <h3>Waiting-time targets (days)</h3>
           <div className="row">{Object.keys(targets).map((k) => <label key={k}>{k}<input type="number" min={1} style={{ width: 84 }} value={targets[k]} onChange={(e) => setTargets({ ...targets, [k]: Number(e.target.value) })} /></label>)}
             <button onClick={run(() => api('PUT', '/api/settings/targets', targets), 'Targets saved')}>Save</button></div>
+          <h3 className="section">Referrals out: chase after (days)</h3>
+          <div className="row">{Object.keys(refDays).map((k) => <label key={k}>{k === 'acknowledge' ? 'no acknowledgement' : k === 'book' ? 'no appointment' : 'no report'}<input type="number" min={1} max={365} style={{ width: 84 }} value={refDays[k]} onChange={(e) => setRefDays({ ...refDays, [k]: Number(e.target.value) })} /></label>)}
+            <button onClick={run(() => api('PUT', '/api/settings/referral-days', refDays), 'Referral deadlines saved')}>Save</button></div>
         </div>
         <div className="card">
           <h3>Clinic sessions</h3>
@@ -95,6 +99,7 @@ export function Admin({ user }: { user: User }) {
           </div>
         </div>
       </div>
+      <Reminders />
 
       <div className="card section">
         <h3>Audit trail <button className="sm" onClick={async () => setChain(await get('/api/audit/verify'))}>Verify integrity</button>
@@ -106,5 +111,42 @@ export function Admin({ user }: { user: User }) {
         </table></div>
       </div>
     </>
+  );
+}
+
+function Reminders() {
+  const [f, setF] = useState<any>(null);
+  const [box, setBox] = useState<any[]>([]);
+  const [secret, setSecret] = useState('');
+  const toast = useToast();
+  const load = () => { get('/api/settings/reminders').then(setF); get('/api/reminders/outbox').then(setBox); };
+  useEffect(load, []);
+  if (!f) return <div className="card section"><Skeleton rows={4} /></div>;
+  const save = (extra: object = {}) => api('PUT', '/api/settings/reminders', { ...f, ...extra })
+    .then((r) => { if (r.secret) setSecret(r.secret); toast('Reminder settings saved'); load(); }).catch((e) => toast(e.message, 'bad'));
+  const set = (k: string) => (e: any) => setF({ ...f, [k]: e.target.type === 'checkbox' ? e.target.checked : e.target.type === 'number' ? Number(e.target.value) : e.target.value });
+  return (
+    <div className="card section">
+      <h3>Appointment reminders</h3>
+      <div className="muted small" style={{ marginBottom: 8 }}>Texts go through your SMS gateway: Arogya POSTs <code>{'{id, channel, to, text}'}</code> as JSON with an <code>X-Arogya-Signature</code> HMAC-SHA256 header. Messages give only the date, time and clinic, never the service or reason. Restricted records and patients who opted out get none.</div>
+      <div className="row">
+        <label className="radio"><input type="checkbox" checked={f.enabled} onChange={set('enabled')} />Send reminders</label>
+        <label>Hours before<input type="number" min={1} max={168} style={{ width: 84 }} value={f.hoursBefore} onChange={set('hoursBefore')} /></label>
+        <label className="grow">Gateway URL (https)<input value={f.webhookUrl} onChange={set('webhookUrl')} placeholder="https://sms.example.org/send" /></label>
+        <label>Clinic name<input value={f.clinicName} onChange={set('clinicName')} /></label>
+        <label>Clinic phone<input value={f.clinicPhone} onChange={set('clinicPhone')} /></label>
+      </div>
+      {secret && <div className="banner warn" style={{ marginTop: 10 }}><Icon name="lock" /><div>Signing secret, shown once. Put it in your gateway now: <code className="secret">{secret}</code></div></div>}
+      <div className="row" style={{ marginTop: 10 }}>
+        <button className="primary" onClick={() => save()}>Save</button>
+        {f.hasSecret && <button onClick={() => save({ rotate: true })}>New signing secret</button>}
+        <button disabled={!f.enabled} onClick={() => api('POST', '/api/admin/reminders/run').then((r) => { toast(`${r.queued} queued · ${r.sent} sent · ${r.failed} failed`); load(); }).catch((e) => toast(e.message, 'bad'))}>Send due now</button>
+      </div>
+      {box.length > 0 && <div className="table-wrap section"><table>
+        <thead><tr><th>Appointment</th><th>Patient</th><th>Status</th></tr></thead>
+        <tbody>{box.slice(0, 20).map((m) => <tr key={m.id}><td>{String(m.start ?? '').slice(0, 16).replace('T', ' ')}</td><td>{m.patient ?? ''}</td>
+          <td><span className={`chip ${m.status === 'sent' ? 'ok' : m.status === 'failed' ? 'bad' : m.status === 'skipped' ? '' : 'warn'}`}>{m.status}</span> <span className="muted small">{m.detail}</span></td></tr>)}</tbody>
+      </table></div>}
+    </div>
   );
 }

@@ -3,6 +3,7 @@ import { createUser } from './auth.ts';
 import { afterWrite, beforeWrite } from './domain.ts';
 import { create } from './fhir/store.ts';
 import { localIso } from './scheduling.ts';
+import { advance, send as sendReferral } from './referrals.ts';
 
 export const DEMO_PASSWORD = 'arogya-demo-2026';
 
@@ -101,6 +102,19 @@ export async function seed(db: Db) {
     beforeWrite('ServiceRequest', sr);
     const r = await create(db, 'ServiceRequest', sr);
     await afterWrite(db, 'ServiceRequest', r, true, system);
+  }
+
+  // Referrals to other providers at different stages; the cardiology one has gone quiet past its deadline.
+  const away: Array<[number, string, string, number, Array<[string, string]>]> = [
+    [21, 'City Hospital Cardiology', 'Echocardiogram', 12, []],
+    [22, 'Community Podiatry', 'Diabetic foot review', 3, []],
+    [23, 'Regional Eye Unit', 'Retinal screening', 40, [['acknowledged', 'On their list']]],
+    [24, 'Memory Clinic', 'Cognitive assessment', 20, [['acknowledged', 'Letter received'], ['booked', 'Seen 2 Dec']]],
+  ];
+  for (const [i, to, service, daysAgo, steps] of away) {
+    const r = await sendReferral(db, { patientId: patients[i].id, patientName: patients[i].name, to, service, requester: u.mehta });
+    await db.query(`update resources set data = jsonb_set(data, '{authoredOn}', to_jsonb($2::text)) where type='ServiceRequest' and id=$1`, [r.id, new Date(now - daysAgo * 86400_000).toISOString()]);
+    for (const [stage, note] of steps) await advance(db, r.id, stage as any, note, 'Rory Reception');
   }
 
   // Past appointment history so DNA risk has something to learn from.

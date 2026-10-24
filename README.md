@@ -2,7 +2,7 @@
 
 Arogya (आरोग्य, "health") is an open-source, FHIR-native electronic health record. It is built to remove the daily waste that clinicians, clerks, managers and patients report in existing systems.
 
-**Status: v0.3, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
+**Status: v0.4, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
 
 ## What it does today
 
@@ -14,6 +14,8 @@ Arogya (आरोग्य, "health") is an open-source, FHIR-native electronic 
 | **Prescribing** | Allergy, interaction, duplicate-therapy and maximum-daily-dose checks. Only *high-severity* alerts interrupt; they need a logged reason to override. Override rate is a KPI |
 | **Results** | Numeric results are auto-flagged against their own reference range and critical limits. Results route to the orderer's inbox. Critical results sort first. A critical result nobody has closed within an hour is escalated to the shared results pool |
 | **Inbox** | Shared work pools (results, messages, triage, scheduling) plus personal queues. **Acknowledge all normal results in one click**; abnormal results are never bulk-closed |
+| **Referrals out** | Referrals to other providers are tracked through sent, acknowledged, booked and report received. Silence past a deadline (editable) creates one chase task for the admin team; recording the reply closes it. A rejection goes back to the referrer as an urgent task |
+| **Appointment reminders** | Text reminders a set number of hours before, sent through your SMS gateway (signed JSON webhook, retried up to three times). Messages carry date, time and clinic only. Restricted records, patients without a phone, and patients who opted out (`urn:arogya:no-reminders` extension on Patient) are skipped, with the reason shown in the outbox |
 | **Recalls** | Long-term condition monitoring (for example HbA1c in diabetes, eGFR in kidney disease): who is overdue, never tested or due within a month, and whether they are already booked. Book straight from the list. The chart shows what is due while the patient is in the room. Rules and intervals are set locally |
 | **Referrals and waiting list** | Priority targets (editable), days-to-breach, breach-ordered worklist |
 | **Scheduling** | Clinic sessions generate slots. Booking is race-safe (two receptionists cannot take one slot). A cancelled or missed appointment creates a *fill this slot* task with ranked waiting-list candidates |

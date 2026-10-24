@@ -3,7 +3,7 @@ import { Link } from 'react-router-dom';
 import { ago, get, post, type User } from '../api.ts';
 import { Empty, Icon, Skeleton, si, useToast } from '../ui.tsx';
 
-const KINDS = ['all', 'result', 'referral', 'message', 'backfill'];
+const KINDS = ['all', 'result', 'referral', 'chase', 'message', 'backfill'];
 
 export function Inbox({ user, onCount }: { user: User; onCount: (n: number) => void }) {
   const [tasks, setTasks] = useState<any[] | null>(null);

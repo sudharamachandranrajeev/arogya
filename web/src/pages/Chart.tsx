@@ -87,7 +87,7 @@ function ClinicalChart({ user }: { user: User }) {
         </div>
         <div className="card lift" style={si(5)}>
           <h3>Referrals and appointments</h3>
-          {c.referrals.map((r: any) => <div key={r.id} className="list-item"><Icon name="list" size={15} />{label(r.code)}<span className={`chip ${r.priority === 'routine' ? '' : 'warn'}`}>{r.priority}</span><span className="muted small" style={{ marginLeft: 'auto' }}>{ago(r.authoredOn ?? r.meta.lastUpdated)} ago</span></div>)}
+          {c.referrals.map((r: any) => <div key={r.id} className="list-item"><Icon name={outbound(r) ? 'send' : 'list'} size={15} />{label(r.code)}{outbound(r) && <span className="muted small">to {r.performer?.[0]?.display}</span>}{outbound(r) && <span className="chip info">{r.extension?.find((e: any) => e.url === 'urn:arogya:referral-stage')?.valueCode ?? 'sent'}</span>}<span className={`chip ${r.priority === 'routine' ? '' : 'warn'}`}>{r.priority}</span><span className="muted small" style={{ marginLeft: 'auto' }}>{ago(r.authoredOn ?? r.meta.lastUpdated)} ago</span></div>)}
           {c.appts.slice(0, 5).map((a: any) => <div key={a.id} className="list-item"><Icon name="today" size={15} />{day(a.start)} {a.start.slice(11, 16)}<span className="chip">{a.status}</span></div>)}
           {!c.referrals.length && !c.appts.length && <div className="muted">None</div>}
           {clinical && <Refer subject={subject} done={refresh} />}
@@ -189,19 +189,28 @@ function Prescribe({ patientId, subject, hdr, done }: { patientId: string; subje
   );
 }
 
+const outbound = (r: any) => r.category?.some((c: any) => c.coding?.some((k: any) => k.code === 'referral-out'));
+
 function Refer({ subject, done }: { subject: any; done: () => void }) {
   const [open, setOpen] = useState(false);
-  const [f, setF] = useState({ service: '', priority: 'routine', reason: '' });
+  const [f, setF] = useState({ service: '', priority: 'routine', reason: '', to: '' });
+  const [away, setAway] = useState(false);
   const toast = useToast();
   if (!open) return <button className="sm" style={{ marginTop: 10 }} onClick={() => setOpen(true)}><Icon name="plus" size={14} />Refer</button>;
   return (
     <div className="row" style={{ marginTop: 10 }}>
+      <div className="row" style={{ width: '100%' }}>
+        <button className={`sm ${away ? 'ghost' : 'primary'}`} onClick={() => setAway(false)}>To our clinics</button>
+        <button className={`sm ${away ? 'primary' : 'ghost'}`} onClick={() => setAway(true)}>To another provider</button>
+      </div>
+      {away && <label style={{ width: '100%' }}>Provider<input value={f.to} onChange={(e) => setF({ ...f, to: e.target.value })} placeholder="e.g. City Hospital Cardiology" /></label>}
       <label className="grow">Service<input autoFocus value={f.service} onChange={(e) => setF({ ...f, service: e.target.value })} placeholder="e.g. Physiotherapy" /></label>
       <label>Priority<select value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })}><option>routine</option><option>urgent</option><option>asap</option><option>stat</option></select></label>
       <label style={{ width: '100%' }}>Reason<input value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></label>
-      <button className="primary" disabled={!f.service} onClick={async () => {
-        await post('/fhir/ServiceRequest', { resourceType: 'ServiceRequest', status: 'active', intent: 'order', category: [{ text: 'referral' }], priority: f.priority, code: { text: f.service }, reasonCode: f.reason ? [{ text: f.reason }] : undefined, subject, authoredOn: new Date().toISOString() });
-        toast(`Referred to ${f.service}`); setOpen(false); setF({ service: '', priority: 'routine', reason: '' }); done();
+      <button className="primary" disabled={!f.service || (away && !f.to.trim())} onClick={async () => {
+        if (away) await post('/api/referrals-out', { patientId: subject.reference.slice(8), patientName: subject.display, to: f.to, service: f.service, priority: f.priority, reason: f.reason || undefined });
+        else await post('/fhir/ServiceRequest', { resourceType: 'ServiceRequest', status: 'active', intent: 'order', category: [{ text: 'referral' }], priority: f.priority, code: { text: f.service }, reasonCode: f.reason ? [{ text: f.reason }] : undefined, subject, authoredOn: new Date().toISOString() });
+        toast(away ? `Referred to ${f.to}: tracked until the report comes back` : `Referred to ${f.service}`); setOpen(false); setF({ service: '', priority: 'routine', reason: '', to: '' }); done();
       }}>Send referral</button>
       <button className="ghost" onClick={() => setOpen(false)}>Cancel</button>
     </div>

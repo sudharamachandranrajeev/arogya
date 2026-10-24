@@ -1,6 +1,6 @@
 {
   "name": "arogya",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Open-source, FHIR-native electronic health record built to remove the inefficiencies of healthcare",
   "license": "AGPL-3.0-or-later",
   "type": "module",

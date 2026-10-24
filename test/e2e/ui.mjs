@@ -96,6 +96,17 @@ await r.click('button:has-text("Undo")');
 await r.waitForSelector('.toast:has-text("Merge undone")');
 step('duplicate merged and the merge undone');
 
+// Reception records that a quiet referral was acknowledged; the chase task goes away.
+await r.goto(base + '/referrals');
+const ref = r.locator('.ref-row', { hasText: 'City Hospital Cardiology' });
+await ref.locator('text=d late').waitFor();
+await ref.locator('button:has-text("Update")').click();
+await ref.locator('input').fill('Phoned: on their list for January');
+await ref.locator('button:has-text("Acknowledged")').click();
+await r.waitForSelector('.toast:has-text("Acknowledged recorded")');
+await ref.locator('text=Waiting for an appointment').waitFor();
+step('quiet referral chased and acknowledged');
+
 // Nurse: forced two-step enrolment end to end.
 const a = await page();
 await signIn(a, 'admin');

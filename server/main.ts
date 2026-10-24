@@ -4,6 +4,8 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { createUser } from './auth.ts';
 import { backup, restore } from './backup.ts';
 import { loadKey } from './secrets.ts';
+import { outbound } from './referrals.ts';
+import { runReminders } from './reminders.ts';
 
 loadKey();
 const db = await openDb();
@@ -36,5 +38,11 @@ if ((await db.query('select 1 from users limit 1')).rows.length === 0) {
 const app = await buildApp(db, { secureCookies: process.env.AROGYA_SECURE_COOKIES === '1' });
 const port = Number(process.env.PORT ?? 8080);
 await app.listen({ port, host: process.env.HOST ?? '127.0.0.1' });
+// Background work: reminders go out and silent referrals get chased without anyone remembering to.
+const housekeeping = async () => {
+  try { await runReminders(db); await outbound(db); } catch (e) { console.error('housekeeping failed:', (e as Error).message); }
+};
+setInterval(housekeeping, 5 * 60_000).unref();
+void housekeeping();
 console.log(`Arogya listening on http://${process.env.HOST ?? '127.0.0.1'}:${port}`);
 for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, async () => { await app.close(); await db.close(); process.exit(0); });

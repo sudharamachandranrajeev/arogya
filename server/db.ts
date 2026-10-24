@@ -122,6 +122,13 @@ create table merge_log(
   undone_at timestamptz, undone_by text);
 create table not_duplicate(a text not null, b text not null, user_id text not null, at timestamptz not null default now(), primary key (a, b));
 `,
+  `
+create table outbox(
+  id text primary key, appointment_id text not null, patient_id text, channel text not null, to_addr text,
+  body text not null, status text not null, detail text, attempts int not null default 0,
+  created_at timestamptz not null default now(), sent_at timestamptz, unique (appointment_id, channel));
+create index outbox_queued on outbox(status);
+`,
 ];
 
 async function migrate(db: Db) {

@@ -232,3 +232,12 @@ label.radio { display: flex; gap: 6px; align-items: center; color: var(--ink); f
 label.radio input { min-height: 0; width: auto; }
 td input, td select { width: 100%; min-width: 80px; }
 button.sm, .btn.sm { white-space: nowrap; }
+.ref-row { border: 1px solid var(--line); border-radius: var(--r-2); padding: 12px 14px; }
+.steps { display: flex; gap: 0; margin-top: 10px; }
+.step { flex: 1; display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); position: relative; padding-top: 2px; }
+.step::before { content: ''; position: absolute; left: 0; right: 0; top: -6px; height: 3px; border-radius: 3px; background: var(--line); transition: background var(--t-3) var(--ease); }
+.step.done { color: var(--ink-2); font-weight: 550; }
+.step.done::before { background: var(--brand); }
+.step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); flex: none; }
+.step.done .dot { background: var(--brand); }
+.step.next .dot { background: var(--panel); box-shadow: 0 0 0 2px var(--brand); animation: pulse 2s var(--ease) infinite; }
