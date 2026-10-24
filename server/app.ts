@@ -5,13 +5,14 @@ import fastifyCookie from '@fastify/cookie';
 import fastifyStatic from '@fastify/static';
 import type { Db } from './db.ts';
 import { audit, verifyChain } from './audit.ts';
-import { can, createUser, login, logout, ROLES, userForToken, type Role, type User } from './auth.ts';
+import { can, changePassword, confirmMfa, createUser, disableMfa, login, logout, ROLES, startMfa, userForToken, type Role, type User } from './auth.ts';
+import { backup } from './backup.ts';
 import { checkMedication } from './cds.ts';
 import { afterWrite, backfillCandidates, beforeWrite, dnaRisk, getSetting, setSetting, waitingList, DEFAULT_TARGET_DAYS } from './domain.ts';
 import * as store from './fhir/store.ts';
 import { SearchError } from './fhir/search.ts';
 import { kpis } from './kpi.ts';
-import { book, slots } from './scheduling.ts';
+import { book, dnaRiskMany, slots, today } from './scheduling.ts';
 
 declare module 'fastify' { interface FastifyRequest { user: User | null; token?: string } }
 
@@ -23,6 +24,9 @@ const POOLS: Record<Role, string[]> = {
   admin: [], clinician: ['results', 'messages', 'triage'], nurse: ['results', 'messages', 'triage'],
   reception: ['scheduling', 'messages'], manager: ['scheduling'], biller: [],
 };
+
+const MFA_SETUP_PATHS = new Set(['/api/me', '/api/logout', '/api/account/mfa/start', '/api/account/mfa/confirm', '/api/account/password']);
+const SLA_DAYS: Record<string, number> = { result: 2, message: 2, referral: 5, backfill: 1 };
 
 const outcome = (severity: string, code: string, text: string, extra: object = {}) =>
   ({ resourceType: 'OperationOutcome', issue: [{ severity, code, diagnostics: text }], ...extra });
@@ -46,6 +50,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   });
 
   app.decorateRequest('user', null);
+  const mfaRoles = async () => (await getSetting(db, 'security', { mfaRoles: [] as Role[] })).mfaRoles;
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0];
     if (!path.startsWith('/api/') && !path.startsWith('/fhir')) return;
@@ -54,7 +59,9 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     req.token = token;
     req.user = await userForToken(db, token);
     const open = path === '/api/login' || path === '/fhir/metadata';
-    if (!req.user && !open) return reply.code(401).send(outcome('error', 'login', 'Not signed in'));
+    if (!req.user && !open) return reply.code(401).send(outcome('error', 'login', 'Not signed in or session expired'));
+    if (req.user && !req.user.mfa && !MFA_SETUP_PATHS.has(path) && (await mfaRoles()).includes(req.user.role))
+      return reply.code(403).send(outcome('error', 'security', 'Your role must set up two-step verification first', { alerts: { mfaSetupRequired: true } }));
     // Cookie sessions need a custom header on writes: browsers cannot add it cross-site without a CORS preflight, which we never grant.
     if (!bearer && !['GET', 'HEAD'].includes(req.method) && path !== '/api/login' && req.headers['x-requested-with'] !== 'arogya')
       return reply.code(403).send(outcome('error', 'forbidden', 'Missing X-Requested-With header'));
@@ -65,6 +72,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     reply.header('x-frame-options', 'DENY');
     reply.header('content-security-policy', "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'");
     if (_req.url.startsWith('/api') || _req.url.startsWith('/fhir')) reply.header('cache-control', 'no-store');
+    if (opts.secureCookies) reply.header('strict-transport-security', 'max-age=31536000; includeSubDomains');
   });
 
   const need = (req: FastifyRequest, ...roles: Role[]) => {
@@ -78,15 +86,15 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   app.get('/health', async () => ({ status: 'ok', version: VERSION }));
 
   app.post('/api/login', async (req, reply) => {
-    const b = req.body as { username?: string; password?: string };
+    const b = req.body as { username?: string; password?: string; code?: string };
     if (!b?.username || !b?.password) throw new store.FhirError(400, 'username and password required');
     try {
-      const { token, user } = await login(db, b.username, b.password, req.ip);
+      const { token, user } = await login(db, b.username, b.password, req.ip, b.code);
       await audit(db, { userId: user.id, username: user.username, action: 'login' });
       reply.setCookie(COOKIE, token, { httpOnly: true, sameSite: 'strict', secure: !!opts.secureCookies, path: '/', maxAge: 12 * 3600 });
-      return { user, token };
-    } catch (e) {
-      await audit(db, { username: b.username, action: 'login-failed', detail: { ip: req.ip } });
+      return { user, token, mfaSetupRequired: !user.mfa && (await mfaRoles()).includes(user.role) };
+    } catch (e: any) {
+      if (!e.alerts?.mfaRequired) await audit(db, { username: b.username, action: 'login-failed', detail: { ip: req.ip } });
       throw e;
     }
   });
@@ -96,7 +104,33 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     reply.clearCookie(COOKIE, { path: '/' });
     return { ok: true };
   });
-  app.get('/api/me', async (req) => ({ user: req.user, version: VERSION }));
+  app.get('/api/me', async (req) => ({
+    user: req.user, version: VERSION,
+    mfaSetupRequired: !!req.user && !req.user.mfa && (await mfaRoles()).includes(req.user.role),
+  }));
+
+  // ---------- own account ----------
+  app.post('/api/account/password', async (req) => {
+    const b = req.body as { current?: string; next?: string };
+    await changePassword(db, req.user!.id, String(b?.current ?? ''), String(b?.next ?? ''), req.token);
+    await log(req, 'password-change');
+    return { ok: true };
+  });
+  app.post('/api/account/mfa/start', async (req) => {
+    if (req.user!.mfa) throw new store.FhirError(409, 'Two-step verification is already on');
+    return startMfa(db, req.user!);
+  });
+  app.post('/api/account/mfa/confirm', async (req) => {
+    await confirmMfa(db, req.user!.id, String((req.body as any)?.code ?? ''));
+    await log(req, 'mfa-enabled');
+    return { ok: true };
+  });
+  app.post('/api/account/mfa/disable', async (req) => {
+    if ((await mfaRoles()).includes(req.user!.role)) throw new store.FhirError(403, 'Your role requires two-step verification');
+    await disableMfa(db, req.user!.id, String((req.body as any)?.password ?? ''));
+    await log(req, 'mfa-disabled');
+    return { ok: true };
+  });
 
   // ---------- FHIR ----------
   const typeOf = (req: FastifyRequest) => {
@@ -168,6 +202,8 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     return { resourceType: 'Bundle', type: 'history', total: rows.length, entry: rows.map((r: any) => ({ resource: r.data, request: { method: r.op.toUpperCase() } })) };
   });
 
+  /** A rule is the alert kind plus the drugs or classes involved, without patient detail. */
+  const ruleOf = (a: { kind: string; message: string }) => `${a.kind}: ${a.message.split(':')[0].replace(/\d+(\.\d+)? mg\/day exceeds.*for /, 'max dose ')}`;
   const medGate = async (req: FastifyRequest, body: any, id?: string) => {
     if (body?.resourceType !== 'MedicationRequest' || body.status !== 'active') return;
     const pid = store.patientOf(body);
@@ -176,6 +212,9 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     const high = alerts.filter((a) => a.severity === 'high');
     if (!high.length) return;
     const reason = String(req.headers['x-override-reason'] ?? '').trim();
+    const overridden = reason.length >= 5;
+    for (const a of high)
+      await db.query('insert into alert_log(user_id,patient_id,rule,severity,overridden) values ($1,$2,$3,$4,$5)', [req.user!.id, pid, ruleOf(a), a.severity, overridden]);
     if (reason.length < 5) throw new store.FhirError(409, 'Safety alerts need a clinician decision: change the prescription or send X-Override-Reason.', alerts);
     await db.query('insert into override_log(user_id,patient_id,medication,alerts,reason) values ($1,$2,$3,$4,$5)',
       [req.user!.id, pid, body.medicationCodeableConcept?.text ?? '', JSON.stringify(alerts), reason]);
@@ -274,10 +313,15 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   const myPools = (u: User) => [`user:${u.id}`, ...(u.practitionerId ? [`user:${u.practitionerId}`] : []), ...POOLS[u.role]];
   app.get('/api/inbox', async (req) => {
     const u = req.user!;
+    // A critical result nobody has closed within an hour leaves the personal queue for the shared results pool.
+    const esc = (await db.query(
+      `update tasks set pool='results', escalated=true where status='open' and kind='result' and priority='urgent'
+       and not escalated and pool like 'user:%' and created_at < now() - interval '1 hour' returning id, patient_id, pool`)).rows;
+    for (const r of esc) await audit(db, { action: 'task-escalated', resourceType: 'Task', resourceId: r.id, patientId: r.patient_id });
     const rows = (await db.query(
       `select * from tasks where status='open' and (pool = any($1::text[]) or assignee=$2)
        order by (priority='urgent') desc, created_at asc limit 500`, [myPools(u), u.id])).rows;
-    return rows.map((r) => ({ id: r.id, kind: r.kind, patientId: r.patient_id, subject: r.subject, refType: r.ref_type, refId: r.ref_id, pool: r.pool, assignee: r.assignee, priority: r.priority, normal: r.normal, createdAt: r.created_at }));
+    return rows.map((r) => ({ id: r.id, kind: r.kind, patientId: r.patient_id, subject: r.subject, refType: r.ref_type, refId: r.ref_id, pool: r.pool, assignee: r.assignee, priority: r.priority, normal: r.normal, escalated: r.escalated, createdAt: r.created_at, overdue: Date.now() - Date.parse(r.created_at) > (SLA_DAYS[r.kind] ?? 3) * 86400_000 }));
   });
   const ownTask = async (req: FastifyRequest) => {
     const { id } = req.params as any;
@@ -362,6 +406,65 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     return reply.code(204).send();
   });
 
+  app.get('/api/today', async (req) => {
+    need(req, 'clinician', 'nurse', 'reception', 'manager', 'admin');
+    const q = req.query as any;
+    const mine = q.all !== '1' && req.user!.practitionerId ? req.user!.practitionerId : undefined;
+    const list = await today(db, q.date, mine);
+    const risks = await dnaRiskMany(db, list.filter((a) => a.status === 'booked').map((a) => a.patientId));
+    return list.map((a) => ({ ...a, dnaRisk: risks[a.patientId] ?? null }));
+  });
+
+  app.get('/api/safety/alert-rules', async (req) => {
+    need(req, 'admin', 'manager', 'clinician');
+    const rows = (await db.query(
+      `select rule, severity, count(*)::int fired, count(*) filter (where overridden)::int overridden from alert_log
+       where at > now() - interval '180 days' group by rule, severity order by fired desc limit 100`)).rows;
+    // A rule overridden almost every time is noise that trains people to ignore alerts: flag it for review.
+    return rows.map((r) => ({ ...r, overridePct: Math.round((r.overridden / r.fired) * 1000) / 10, review: r.fired >= 10 && r.overridden / r.fired > 0.95 }));
+  });
+
+  app.get('/api/stuck-work', async (req) => {
+    need(req, 'admin', 'manager', 'clinician', 'nurse', 'reception');
+    const rows = (await db.query(`select id, kind, subject, pool, priority, patient_id, created_at from tasks where status='open' order by created_at limit 1000`)).rows;
+    return rows.filter((r) => Date.now() - Date.parse(r.created_at) > (SLA_DAYS[r.kind] ?? 3) * 86400_000)
+      .map((r) => ({ id: r.id, kind: r.kind, subject: r.subject, pool: r.pool, priority: r.priority, patientId: r.patient_id, ageDays: Math.floor((Date.now() - Date.parse(r.created_at)) / 86400_000), slaDays: SLA_DAYS[r.kind] ?? 3 }));
+  });
+
+  /** Data-protection report: every recorded access to one patient's record. */
+  app.get('/api/patients/:id/access-log', async (req) => {
+    need(req, 'admin');
+    const { id } = req.params as any;
+    const rows = (await db.query(
+      `select a.at, a.username, u.name, u.role, a.action, a.resource_type, a.reason from audit a left join users u on u.id=a.user_id
+       where a.patient_id=$1 order by a.seq desc limit 2000`, [id])).rows;
+    await log(req, 'access-report', { type: 'Patient', id, patientId: id });
+    return rows;
+  });
+
+  app.get('/api/settings/security', async (req) => { need(req, 'admin'); return getSetting(db, 'security', { mfaRoles: [] }); });
+  app.put('/api/settings/security', async (req) => {
+    const u = need(req, 'admin');
+    const roles = ((req.body as any)?.mfaRoles ?? []) as Role[];
+    if (!Array.isArray(roles) || roles.some((r) => !ROLES.includes(r))) throw new store.FhirError(422, 'Unknown role');
+    if (roles.includes('admin') && !u.mfa) throw new store.FhirError(422, 'Turn on two-step verification for yourself before requiring it for admins');
+    await setSetting(db, 'security', { mfaRoles: roles });
+    await log(req, 'settings-update', { detail: { mfaRoles: roles } });
+    return { ok: true };
+  });
+
+  /** Encrypted full backup. Admin with two-step verification only: the file holds every record. */
+  app.post('/api/admin/backup', async (req, reply) => {
+    const u = need(req, 'admin');
+    if (!u.mfa) throw new store.FhirError(403, 'Turn on two-step verification before taking backups');
+    const passphrase = String((req.body as any)?.passphrase ?? '');
+    let file: Buffer;
+    try { file = await backup(db, passphrase); } catch (e: any) { throw new store.FhirError(422, e.message); }
+    await log(req, 'backup', { detail: { bytes: file.length } });
+    const name = `arogya-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.arogya-backup`;
+    return reply.type('application/octet-stream').header('content-disposition', `attachment; filename="${name}"`).send(file);
+  });
+
   // ---------- management ----------
   app.get('/api/kpi', async (req) => { need(req, 'admin', 'manager', 'clinician'); return kpis(db, Number((req.query as any).days ?? 90)); });
   app.get('/api/settings/targets', async () => getSetting(db, 'targets', DEFAULT_TARGET_DAYS));
@@ -377,7 +480,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   // ---------- administration ----------
   app.get('/api/users', async (req) => {
     need(req, 'admin');
-    return (await db.query('select id,username,name,role,practitioner_id,active,created_at from users order by username')).rows;
+    return (await db.query('select id,username,name,role,practitioner_id,active,created_at,(totp_secret is not null) as mfa from users order by username')).rows;
   });
   app.post('/api/users', async (req, reply) => {
     need(req, 'admin');
@@ -390,11 +493,12 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   app.patch('/api/users/:id', async (req) => {
     need(req, 'admin');
     const { id } = req.params as any;
-    const b = req.body as { active?: boolean; role?: Role };
+    const b = req.body as { active?: boolean; role?: Role; resetMfa?: boolean };
     if (id === req.user!.id && b.active === false) throw new store.FhirError(422, 'You cannot deactivate yourself');
     if (b.role && !ROLES.includes(b.role)) throw new store.FhirError(422, 'Unknown role');
     await db.query('update users set active=coalesce($2,active), role=coalesce($3,role) where id=$1', [id, b.active ?? null, b.role ?? null]);
-    if (b.active === false) await db.query('delete from sessions where user_id=$1', [id]);
+    if (b.resetMfa) await db.query('update users set totp_secret=null, totp_pending=null, totp_last_step=null where id=$1', [id]);
+    if (b.active === false || b.resetMfa || b.role) await db.query('delete from sessions where user_id=$1', [id]);
     await log(req, 'user-update', { id, detail: b });
     return { ok: true };
   });

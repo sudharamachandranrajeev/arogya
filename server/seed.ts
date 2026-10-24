@@ -95,4 +95,16 @@ export async function seed(db: Db) {
       participant: [{ actor: { reference: `Patient/${p.id}`, display: p.name }, status: 'accepted' }, { actor: ref('Practitioner', u.mehta), status: 'accepted' }],
     });
   }
+
+  // Today's clinic so the day view has something to show.
+  for (let i = 0; i < 8; i++) {
+    const p = patients[i + 1];
+    const start = new Date(); start.setHours(9, i * 50, 0, 0);
+    const past = start.getTime() < now;
+    await create(db, 'Appointment', {
+      resourceType: 'Appointment', status: past ? (i % 4 === 3 ? 'noshow' : 'fulfilled') : i % 3 === 0 ? 'arrived' : 'booked',
+      start: localIso(start), end: localIso(new Date(start.getTime() + 20 * 60_000)), serviceType: [{ text: SERVICES[i % 4] }],
+      participant: [{ actor: { reference: `Patient/${p.id}`, display: p.name }, status: 'accepted' }, { actor: ref('Practitioner', u.mehta), status: 'accepted' }],
+    });
+  }
 }

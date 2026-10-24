@@ -82,3 +82,13 @@ test('audit chain verifies and detects tampering', async () => {
   const v = await verifyChain(db);
   assert.equal(v.ok, false);
 });
+
+test('administrators cannot read clinical content', async () => {
+  const { as } = await setup();
+  const doc = await as('clinician');
+  const p = (await doc('POST', '/fhir/Patient', patient())).body;
+  const admin = await as('admin');
+  assert.equal((await admin('GET', '/fhir/Observation')).status, 403);
+  assert.equal((await admin('GET', `/api/patients/${p.id}/summary`)).status, 403);
+  assert.equal((await admin('GET', `/fhir/Patient/${p.id}`)).status, 200);
+});

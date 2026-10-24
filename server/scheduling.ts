@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import type { Db } from './db.ts';
 import { FhirError, create, patientOf, search } from './fhir/store.ts';
+import { dnaRisk } from './domain.ts';
 
 export type Slot = { start: string; end: string; practitionerId: string; service: string; location: string; free: boolean };
 
@@ -63,3 +64,29 @@ export async function book(db: Db, b: { patientId: string; practitionerId: strin
   });
 }
 export { patientOf };
+
+/** One clinic day, in time order, with what the receptionist and clinician need at a glance. */
+export async function today(db: Db, date?: string, practitionerId?: string) {
+  const d = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : localIso(new Date()).slice(0, 10);
+  const q: Record<string, string> = { date: d, _count: '200', _sort: 'date' };
+  if (practitionerId) q.practitioner = practitionerId;
+  const appts = (await search(db, 'Appointment', q)).resources.filter((a) => a.status !== 'cancelled');
+  const out = [];
+  for (const a of appts) {
+    const pRef = a.participant?.find((p: any) => String(p.actor?.reference).startsWith('Patient/'))?.actor;
+    const patientId = String(pRef?.reference ?? '').slice(8);
+    const allergies = patientId ? (await search(db, 'AllergyIntolerance', { patient: patientId, status: 'active', _count: '0' })).total : 0;
+    out.push({
+      id: a.id, start: a.start, end: a.end, status: a.status, service: a.serviceType?.[0]?.text ?? '',
+      patientId, patientName: pRef?.display ?? '', allergies,
+      practitionerId: String(a.participant?.find((p: any) => String(p.actor?.reference).startsWith('Practitioner/'))?.actor?.reference ?? '').slice(13),
+    });
+  }
+  return out.sort((x, y) => x.start.localeCompare(y.start));
+}
+
+export async function dnaRiskMany(db: Db, patientIds: string[]) {
+  const out: Record<string, Awaited<ReturnType<typeof dnaRisk>>> = {};
+  for (const id of new Set(patientIds)) if (id) out[id] = await dnaRisk(db, id, 0);
+  return out;
+}

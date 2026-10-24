@@ -23,3 +23,4 @@ jobs:
           node server/main.ts &
           for i in $(seq 30); do curl -sf localhost:8080/health && break; sleep 1; done
           curl -sf -XPOST localhost:8080/api/login -H 'content-type: application/json' -d '{"username":"mehta","password":"arogya-demo-2026"}' | grep -q token
+          node test/e2e/ui.mjs http://127.0.0.1:8080 "$(which google-chrome)"

@@ -1,9 +1,22 @@
 import { openDb } from './db.ts';
 import { buildApp } from './app.ts';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { createUser } from './auth.ts';
+import { backup, restore } from './backup.ts';
+import { loadKey } from './secrets.ts';
 
+loadKey();
 const db = await openDb();
 const args = process.argv.slice(2);
+
+if (args[0] === 'backup' || args[0] === 'restore') {
+  const pass = process.env.AROGYA_BACKUP_PASSPHRASE ?? '';
+  if (!args[1] || !pass) { console.error(`usage: AROGYA_BACKUP_PASSPHRASE=... main.ts ${args[0]} <file>`); process.exit(2); }
+  if (args[0] === 'backup') { writeFileSync(args[1], await backup(db, pass), { mode: 0o600 }); console.log(`backup written to ${args[1]}`); }
+  else console.log('restored', await restore(db, readFileSync(args[1]), pass));
+  await db.close();
+  process.exit(0);
+}
 
 if (args[0] === 'adduser') {
   const [, username, role, name, password] = args;

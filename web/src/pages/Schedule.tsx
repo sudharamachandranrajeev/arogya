@@ -1,53 +1,72 @@
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
-import { day, get, post, type User } from '../api.ts';
+import { get, post, type User } from '../api.ts';
+import { Empty, Icon, Skeleton, si, useToast } from '../ui.tsx';
 
 export function Schedule({ user }: { user: User }) {
-  const [wl, setWl] = useState<any[]>([]);
+  const [wl, setWl] = useState<any[] | null>(null);
   const [sel, setSel] = useState<any>(null);
-  const [slots, setSlots] = useState<any[]>([]);
+  const [slots, setSlots] = useState<any[] | null>(null);
   const [back, setBack] = useState<any[]>([]);
   const [risk, setRisk] = useState<any>(null);
+  const [filter, setFilter] = useState('');
   const [err, setErr] = useState('');
+  const toast = useToast();
   const canBook = ['clinician', 'nurse', 'reception'].includes(user.role);
   const load = () => { get('/api/waiting-list').then(setWl); get('/api/backfill').then(setBack); };
   useEffect(load, []);
   const pick = async (w: any) => {
-    setSel(w); setErr(''); setRisk(null);
-    setSlots((await get(`/api/slots?days=21&service=${encodeURIComponent(w.service)}`)).filter((s: any) => s.free).slice(0, 12));
+    setSel(w); setErr(''); setRisk(null); setSlots(null);
+    setSlots((await get(`/api/slots?days=21&service=${encodeURIComponent(w.service)}`)).filter((s: any) => s.free).slice(0, 15));
+    get(`/api/patients/${w.patientId}/dna-risk?leadDays=14`).then(setRisk).catch(() => {});
   };
   const reserve = async (s: any) => {
     try {
       await post('/api/appointments/book', { patientId: sel.patientId, patientName: sel.patientName, practitionerId: s.practitionerId, start: s.start, end: s.end, service: sel.service, referralId: sel.id });
-      setSel(null); setSlots([]); load();
+      toast(`${sel.patientName} booked ${s.start.slice(0, 10)} at ${s.start.slice(11, 16)}`);
+      setSel(null); setSlots(null); load();
     } catch (e: any) { setErr(e.message); pick(sel); }
   };
+  const shown = (wl ?? []).filter((w) => !filter || w.service === filter);
+  const services = [...new Set((wl ?? []).map((w) => w.service))];
   return (
     <>
-      <h2>Waiting list <span className="chip">{wl.length}</span></h2>
-      {back.length > 0 && <div className="banner warn">Freed slots: best candidates to call first — {back.slice(0, 3).map((b) => `${b.patientName} (${b.service}, ${Math.round(b.dna.risk * 100)}% DNA risk)`).join('; ')}</div>}
-      <div className="grid" style={{ gridTemplateColumns: '2fr 1fr' }}>
+      <div className="page-head">
+        <div><h2>Waiting list</h2><div className="sub">{wl ? `${wl.length} waiting · ${wl.filter((w) => w.breached).length} past target · longest first by breach date` : 'Loading…'}</div></div>
+        <div className="row">{['', ...services].map((s) => <button key={s} className={`sm ${filter === s ? 'primary' : 'ghost'}`} onClick={() => setFilter(s)}>{s || 'All services'}</button>)}</div>
+      </div>
+      {back.length > 0 && <div className="banner warn"><Icon name="today" /><div><b>A slot was freed.</b> Call first: {back.slice(0, 3).map((b) => `${b.patientName} (${b.service}, ${b.breached ? 'past target' : `${b.daysToBreach} d left`})`).join(' · ')}</div></div>}
+      <div className="split">
         <div className="card">
-          <table>
-            <thead><tr><th>Patient</th><th>Service</th><th>Priority</th><th>Waiting</th><th>Breach</th><th /></tr></thead>
-            <tbody>{wl.map((w) => (
-              <tr key={w.id}>
-                <td><Link to={`/patients/${w.patientId}`}>{w.patientName}</Link></td><td>{w.service}</td>
-                <td><span className={`chip ${w.priority === 'urgent' || w.priority === 'asap' ? 'warn' : ''}`}>{w.priority}</span></td>
-                <td>{w.waitingDays} d</td>
+          {!wl ? <Skeleton rows={8} h={28} /> : !shown.length ? <Empty>No one waiting.</Empty> : <div className="table-wrap"><table>
+            <thead><tr><th>Patient</th><th>Service</th><th>Priority</th><th className="num">Waiting</th><th>Target</th><th /></tr></thead>
+            <tbody className="stagger">{shown.map((w, i) => (
+              <tr key={w.id} style={{ ...si(i), background: sel?.id === w.id ? 'var(--brand-soft)' : undefined }}>
+                <td><Link to={`/patients/${w.patientId}`}><b>{w.patientName}</b></Link></td><td>{w.service}</td>
+                <td><span className={`chip ${w.priority === 'routine' ? '' : 'warn'}`}>{w.priority}</span></td>
+                <td className="num">{w.waitingDays} d</td>
                 <td><span className={`chip ${w.breached ? 'bad' : w.daysToBreach <= 14 ? 'warn' : 'ok'}`}>{w.breached ? `${-w.daysToBreach} d over` : `${w.daysToBreach} d left`}</span></td>
-                <td>{canBook && <button onClick={() => pick(w)}>Book</button>}</td>
+                <td className="num">{canBook && <button className="sm" onClick={() => pick(w)}>Book</button>}</td>
               </tr>))}</tbody>
-          </table>
+          </table></div>}
         </div>
-        <div className="card">
-          <h3>{sel ? `Slots for ${sel.patientName}` : 'Pick a patient to book'}</h3>
-          {err && <div className="err">{err}</div>}
-          {sel && !slots.length && <div className="muted">No free slots in 3 weeks for {sel.service}. Add clinic sessions in Admin.</div>}
-          {slots.map((s) => <div key={s.start + s.practitionerId} className="row" style={{ marginBottom: 4 }}>
-            <button onClick={() => reserve(s)}>{day(s.start)} {s.start.slice(11, 16)}</button><span className="muted">{s.location}</span></div>)}
-          {sel && <button style={{ marginTop: 8 }} onClick={async () => setRisk(await get(`/api/patients/${sel.patientId}/dna-risk?leadDays=14`))}>Check no-show risk</button>}
-          {risk && <div>Risk {Math.round(risk.risk * 100)}%<ul>{risk.reasons.map((r: string) => <li key={r}>{r}</li>)}</ul></div>}
+        <div className="card" style={{ position: 'sticky', top: 20 }}>
+          {!sel ? <><h3>Book</h3><div className="muted">Pick someone from the list. Free slots for their service appear here.</div></> : (
+            <>
+              <h3>Free slots</h3>
+              <div style={{ fontWeight: 600, fontSize: 16 }}>{sel.patientName}</div>
+              <div className="muted small" style={{ marginBottom: 10 }}>{sel.service} · {sel.priority}</div>
+              {risk && <div className={`banner ${risk.risk >= 0.3 ? 'warn' : 'info'}`}><Icon name="alert" /><div>No-show risk {Math.round(risk.risk * 100)}%{risk.reasons.length ? `: ${risk.reasons.join('; ')}` : ''}{risk.risk >= 0.3 && '. Consider a reminder call or an earlier slot.'}</div></div>}
+              {err && <div className="err">{err}</div>}
+              {!slots ? <Skeleton rows={4} h={34} /> : !slots.length ? <div className="muted">No free slots in the next 3 weeks for {sel.service}. Add clinic sessions in Admin.</div> : (
+                <div className="stagger" style={{ display: 'grid', gap: 6 }}>{slots.map((s, i) => (
+                  <button key={s.start + s.practitionerId} style={{ ...si(i), justifyContent: 'space-between' }} onClick={() => reserve(s)}>
+                    <span>{new Date(s.start).toLocaleDateString(undefined, { weekday: 'short', day: 'numeric', month: 'short' })} · <b>{s.start.slice(11, 16)}</b></span><span className="muted small">{s.location}</span>
+                  </button>))}</div>
+              )}
+              <button className="ghost sm" style={{ marginTop: 10 }} onClick={() => setSel(null)}>Cancel</button>
+            </>
+          )}
         </div>
       </div>
     </>

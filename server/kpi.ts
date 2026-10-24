@@ -20,6 +20,8 @@ export async function kpis(db: Db, sinceDays = 90) {
     `select coalesce(avg(extract(epoch from (done_at-created_at))/3600),0) h, count(*)::int n from tasks
      where kind='result' and status='done' and done_at > now() - ($1 || ' days')::interval`, [String(sinceDays)])).rows[0];
   const overrides = Number((await db.query(`select count(*) n from override_log where at > now() - ($1 || ' days')::interval`, [String(sinceDays)])).rows[0].n);
+  const stuck = (await db.query(
+    `select count(*)::int n from tasks where status='open' and created_at < now() - (case kind when 'result' then 2 when 'message' then 2 when 'referral' then 5 when 'backfill' then 1 else 3 end) * interval '1 day'`)).rows[0].n;
   const rx = (await search(db, 'MedicationRequest', { _count: '0' })).total;
   return {
     sinceDays,
@@ -42,6 +44,7 @@ export async function kpis(db: Db, sinceDays = 90) {
       byKind: Object.fromEntries(tasks.map((t) => [t.kind, { open: t.n, avgAgeDays: Math.round(t.age * 10) / 10, normalResults: t.normal }])),
       resultTurnaroundHours: Math.round(Number(turnaround.h) * 10) / 10,
       resultsClosed: turnaround.n,
+      overdue: stuck,
     },
     safety: {
       prescriptions: rx, alertOverrides: overrides,

@@ -104,6 +104,16 @@ create table override_log(
   id bigserial primary key, at timestamptz not null default now(), user_id text, patient_id text,
   medication text, alerts jsonb not null, reason text not null);
 `,
+  `
+alter table users add column totp_secret text;
+alter table users add column totp_pending text;
+alter table users add column totp_last_step bigint;
+alter table sessions add column last_seen timestamptz not null default now();
+alter table tasks add column escalated boolean not null default false;
+create table alert_log(
+  id bigserial primary key, at timestamptz not null default now(), user_id text, patient_id text,
+  rule text not null, severity text not null, overridden boolean not null);
+`,
 ];
 
 async function migrate(db: Db) {

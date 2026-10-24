@@ -48,7 +48,7 @@ export function patientOf(res: any): string | null {
 const etag = (v: number) => `W/"${v}"`;
 export const parseEtag = (h?: string) => (h ? parseInt(h.replace(/\D/g, '')) : undefined);
 
-async function index(q: Db, type: string, id: string, res: any) {
+export async function reindex(q: Db, type: string, id: string, res: any) {
   await q.query('delete from search_idx where type=$1 and id=$2', [type, id]);
   const rows = extract(res);
   if (rows.length) {
@@ -73,7 +73,7 @@ export async function create(q: Db, type: string, body: any, id: string = random
   const res = stamp({ ...body }, id, 1, at);
   await q.query('insert into resources(type,id,version,data,last_updated) values ($1,$2,1,$3,$4)', [type, id, res, at]);
   await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,1,$3,false,$4,'create')", [type, id, res, at]);
-  await index(q, type, id, res);
+  await reindex(q, type, id, res);
   return res;
 }
 
@@ -95,7 +95,7 @@ export async function update(q: Db, type: string, id: string, body: any, ifMatch
   const res = stamp({ ...body }, id, v, at);
   await q.query('update resources set version=$3, data=$4, deleted=false, last_updated=$5 where type=$1 and id=$2', [type, id, v, res, at]);
   await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,$3,$4,false,$5,'update')", [type, id, v, res, at]);
-  await index(q, type, id, res);
+  await reindex(q, type, id, res);
   return { res, created: false };
 }
 
