@@ -4,7 +4,7 @@ import { reindex } from './fhir/store.ts';
 import { decryptWithPassphrase, encryptWithPassphrase } from './secrets.ts';
 
 /** Tables in restore order. search_idx is rebuilt; sessions are never backed up. */
-const TABLES = ['users', 'settings', 'clinic_sessions', 'resources', 'resource_history', 'tasks', 'audit', 'override_log', 'alert_log'];
+const TABLES = ['users', 'settings', 'clinic_sessions', 'resources', 'resource_history', 'tasks', 'audit', 'override_log', 'alert_log', 'alert_tuning', 'merge_log', 'not_duplicate'];
 const SERIALS: Record<string, string> = { audit: 'seq', override_log: 'id', alert_log: 'id' };
 export const MIN_PASSPHRASE = 12;
 

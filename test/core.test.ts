@@ -91,4 +91,8 @@ test('administrators cannot read clinical content', async () => {
   assert.equal((await admin('GET', '/fhir/Observation')).status, 403);
   assert.equal((await admin('GET', `/api/patients/${p.id}/summary`)).status, 403);
   assert.equal((await admin('GET', `/fhir/Patient/${p.id}`)).status, 200);
+  // Managers see service figures, not people.
+  const mgr = await as('manager');
+  assert.equal((await mgr('GET', '/api/search/patients?q=Test')).status, 403);
+  assert.equal((await mgr('POST', '/api/patients/check-duplicate', { family: 'Test', birthDate: '1980-01-01' })).status, 403);
 });

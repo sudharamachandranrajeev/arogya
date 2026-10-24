@@ -8,7 +8,20 @@ const kb: { ingredients: Record<string, Drug>; interactions: Interaction[] } = J
   readFileSync(new URL('../data/drugs.json', import.meta.url), 'utf8'),
 );
 
-export type Alert = { kind: 'allergy' | 'interaction' | 'duplicate' | 'dose'; severity: 'high' | 'moderate'; message: string };
+export type Alert = { kind: 'allergy' | 'interaction' | 'duplicate' | 'dose'; severity: 'high' | 'moderate'; message: string; quietened?: boolean };
+
+/** A rule is the alert kind plus the drugs or classes involved, without patient detail. */
+export const ruleOf = (a: Alert) => `${a.kind}: ${a.message.split(':')[0].replace(/\d+(\.\d+)? mg\/day exceeds.*for /, 'max dose ')}`;
+
+/**
+ * Rules a clinician has judged noisy stop interrupting: they are still shown, as moderate.
+ * Allergy alerts are about this patient, not a rule, so they always interrupt.
+ */
+export async function applyTuning(db: Db, alerts: Alert[]): Promise<Alert[]> {
+  if (!alerts.some((a) => a.severity === 'high' && a.kind !== 'allergy')) return alerts;
+  const quiet = new Set((await db.query('select rule from alert_tuning')).rows.map((r: any) => r.rule));
+  return alerts.map((a) => (a.severity === 'high' && a.kind !== 'allergy' && quiet.has(ruleOf(a)) ? { ...a, severity: 'moderate', quietened: true } : a));
+}
 
 const text = (cc: any) => String(cc?.text ?? cc?.coding?.[0]?.display ?? '').toLowerCase();
 

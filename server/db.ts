@@ -114,6 +114,14 @@ create table alert_log(
   id bigserial primary key, at timestamptz not null default now(), user_id text, patient_id text,
   rule text not null, severity text not null, overridden boolean not null);
 `,
+  `
+create table alert_tuning(rule text primary key, user_id text not null, reason text not null, at timestamptz not null default now());
+create table merge_log(
+  id text primary key, keep_id text not null, merged_id text not null, moved jsonb not null, tasks jsonb not null,
+  added_ids jsonb not null, reason text not null, user_id text not null, at timestamptz not null default now(),
+  undone_at timestamptz, undone_by text);
+create table not_duplicate(a text not null, b text not null, user_id text not null, at timestamptz not null default now(), primary key (a, b));
+`,
 ];
 
 async function migrate(db: Db) {

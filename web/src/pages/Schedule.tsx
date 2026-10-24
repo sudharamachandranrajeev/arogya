@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useSearchParams } from 'react-router-dom';
 import { get, post, type User } from '../api.ts';
 import { Empty, Icon, Skeleton, si, useToast } from '../ui.tsx';
 
@@ -13,8 +13,14 @@ export function Schedule({ user }: { user: User }) {
   const [err, setErr] = useState('');
   const toast = useToast();
   const canBook = ['clinician', 'nurse', 'reception'].includes(user.role);
+  const [params, setParams] = useSearchParams();
   const load = () => { get('/api/waiting-list').then(setWl); get('/api/backfill').then(setBack); };
   useEffect(load, []);
+  // Arriving from a recall: book that patient straight away, with no referral behind it.
+  useEffect(() => {
+    const patientId = params.get('patient');
+    if (patientId) { pick({ patientId, patientName: params.get('name') ?? '', service: params.get('service') ?? '', reason: params.get('reason') ?? undefined }); setParams({}, { replace: true }); }
+  }, []);
   const pick = async (w: any) => {
     setSel(w); setErr(''); setRisk(null); setSlots(null);
     setSlots((await get(`/api/slots?days=21&service=${encodeURIComponent(w.service)}`)).filter((s: any) => s.free).slice(0, 15));
@@ -22,7 +28,7 @@ export function Schedule({ user }: { user: User }) {
   };
   const reserve = async (s: any) => {
     try {
-      await post('/api/appointments/book', { patientId: sel.patientId, patientName: sel.patientName, practitionerId: s.practitionerId, start: s.start, end: s.end, service: sel.service, referralId: sel.id });
+      await post('/api/appointments/book', { patientId: sel.patientId, patientName: sel.patientName, practitionerId: s.practitionerId, start: s.start, end: s.end, service: sel.service || s.service, referralId: sel.id, reason: sel.reason });
       toast(`${sel.patientName} booked ${s.start.slice(0, 10)} at ${s.start.slice(11, 16)}`);
       setSel(null); setSlots(null); load();
     } catch (e: any) { setErr(e.message); pick(sel); }
@@ -55,7 +61,7 @@ export function Schedule({ user }: { user: User }) {
             <>
               <h3>Free slots</h3>
               <div style={{ fontWeight: 600, fontSize: 16 }}>{sel.patientName}</div>
-              <div className="muted small" style={{ marginBottom: 10 }}>{sel.service} · {sel.priority}</div>
+              <div className="muted small" style={{ marginBottom: 10 }}>{[sel.service || 'Any clinic', sel.priority, sel.reason].filter(Boolean).join(' · ')}</div>
               {risk && <div className={`banner ${risk.risk >= 0.3 ? 'warn' : 'info'}`}><Icon name="alert" /><div>No-show risk {Math.round(risk.risk * 100)}%{risk.reasons.length ? `: ${risk.reasons.join('; ')}` : ''}{risk.risk >= 0.3 && '. Consider a reminder call or an earlier slot.'}</div></div>}
               {err && <div className="err">{err}</div>}
               {!slots ? <Skeleton rows={4} h={34} /> : !slots.length ? <div className="muted">No free slots in the next 3 weeks for {sel.service}. Add clinic sessions in Admin.</div> : (

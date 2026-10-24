@@ -7,6 +7,7 @@ import { Inbox } from './pages/Inbox.tsx';
 import { Patients } from './pages/Patients.tsx';
 import { Chart } from './pages/Chart.tsx';
 import { Schedule } from './pages/Schedule.tsx';
+import { Recalls } from './pages/Recalls.tsx';
 import { Dashboard } from './pages/Dashboard.tsx';
 import { Admin } from './pages/Admin.tsx';
 import { Account, MfaSetup } from './pages/Account.tsx';
@@ -17,6 +18,7 @@ const NAV: Nav[] = [
   { to: '/inbox', name: 'Inbox', icon: 'inbox', key: 'i', roles: ['clinician', 'nurse', 'reception', 'manager'] },
   { to: '/patients', name: 'Patients', icon: 'users', key: 'p', roles: ['admin', 'clinician', 'nurse', 'reception', 'biller'] },
   { to: '/schedule', name: 'Waiting list', icon: 'list', key: 'w', roles: ['clinician', 'nurse', 'reception', 'manager', 'admin'] },
+  { to: '/recalls', name: 'Recalls', icon: 'repeat', key: 'r', roles: ['clinician', 'nurse', 'reception', 'manager'] },
   { to: '/dashboard', name: 'Dashboard', icon: 'chart', key: 'd', roles: ['clinician', 'manager', 'admin'] },
   { to: '/admin', name: 'Admin', icon: 'shield', key: 'a', roles: ['admin'] },
   { to: '/account', name: 'My account', icon: 'user', key: 'm', roles: ['admin', 'clinician', 'nurse', 'reception', 'manager', 'biller'] },
@@ -200,7 +202,8 @@ export function App() {
               <Route path="/patients" element={<Patients user={user} />} />
               <Route path="/patients/:id" element={<Chart user={user} />} />
               <Route path="/schedule" element={<Schedule user={user} />} />
-              <Route path="/dashboard" element={<Dashboard />} />
+              <Route path="/recalls" element={<Recalls user={user} />} />
+              <Route path="/dashboard" element={<Dashboard user={user} />} />
               <Route path="/admin" element={<Admin user={user} />} />
               <Route path="/account" element={<Account user={user} onChange={refreshMe} />} />
               <Route path="*" element={<Navigate to={home} replace />} />

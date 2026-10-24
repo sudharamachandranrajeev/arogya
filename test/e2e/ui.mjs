@@ -60,6 +60,42 @@ await p.click('button.primary');
 await p.locator('.patient-banner').or(p.getByText('Restricted record')).first().waitFor();
 step('lock screen hides the record and returns to it');
 
+// Recalls: an overdue patient is booked straight from the list.
+await p.goto(base + '/recalls');
+await p.waitForSelector('text=Overdue');
+const row = p.locator('tr').filter({ has: p.locator('text=Overdue') }).filter({ has: p.locator('button:has-text("Book")') }).first();
+const who = await row.locator('td b').textContent();
+await row.locator('button:has-text("Book")').click();
+await p.waitForSelector(`text=Recall:`);
+await p.locator('.split button', { hasText: ':' }).first().click();
+await p.waitForSelector(`.toast:has-text("${who} booked")`);
+await p.goto(base + '/recalls');
+await p.locator('tr', { hasText: who }).locator('text=Booked').first().waitFor();
+step('overdue recall booked from the list');
+
+// A noisy alert rule stops interrupting, with a reason.
+await p.goto(base + '/dashboard');
+await p.locator('tr', { hasText: 'spironolactone with ramipril' }).locator('button:has-text("Stop interrupting")').click();
+await p.fill('input[placeholder^="Clinical reason"]', 'Heart failure clinic co-prescribes with potassium checks');
+await p.click('button:has-text("Confirm")');
+await p.waitForSelector('text=not interrupting');
+step('noisy alert rule quietened with a reason');
+
+// Reception: merge a duplicate, then undo it.
+const r = await page();
+await signIn(r, 'reception');
+await r.goto(base + '/patients');
+await r.click('button:has-text("Possible duplicates")');
+await r.waitForSelector('.dup');
+await r.locator('.dup button:has-text("Merge")').first().click();
+assert.equal(await r.isDisabled('button:has-text("Merge records")'), true);
+await r.fill('.merge-box input[placeholder^="How you confirmed"]', 'Checked photo ID and address at the desk');
+await r.click('button:has-text("Merge records")');
+await r.waitForSelector('.toast:has-text("Records merged")');
+await r.click('button:has-text("Undo")');
+await r.waitForSelector('.toast:has-text("Merge undone")');
+step('duplicate merged and the merge undone');
+
 // Nurse: forced two-step enrolment end to end.
 const a = await page();
 await signIn(a, 'admin');

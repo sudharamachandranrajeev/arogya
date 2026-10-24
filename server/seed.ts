@@ -44,6 +44,10 @@ export async function seed(db: Db) {
     });
     patients.push({ id: p.id, name: `${given} ${family}` });
   }
+  // One person registered twice, so the duplicates worklist has something to resolve.
+  const twin = (await db.query(`select data from resources where type='Patient' and id=$1`, [patients[4].id])).rows[0].data;
+  await create(db, 'Patient', { resourceType: 'Patient', active: true, name: [{ family: twin.name[0].family, given: twin.name[0].given, text: twin.name[0].text }],
+    gender: twin.gender, birthDate: twin.birthDate, identifier: [{ system: 'urn:arogya:mrn', value: 'A900004' }] });
 
   for (let i = 0; i < 40; i++) {
     const p = patients[i];
@@ -51,6 +55,7 @@ export async function seed(db: Db) {
     if (i % 5 === 0) await create(db, 'AllergyIntolerance', { resourceType: 'AllergyIntolerance', clinicalStatus: { coding: [{code: 'active'}] }, code: { text: 'Penicillin' }, patient: subject, criticality: 'high' });
     if (i % 3 === 0) await create(db, 'Condition', { resourceType: 'Condition', clinicalStatus: { coding: [{ code: 'active' }] }, code: { text: pick(['Type 2 diabetes', 'Hypertension', 'Asthma', 'Urinary incontinence']) }, subject });
     if (i % 4 === 0) await create(db, 'MedicationRequest', { resourceType: 'MedicationRequest', status: 'active', intent: 'order', medicationCodeableConcept: { text: pick(['Ramipril 5 mg', 'Metformin 500 mg', 'Warfarin 3 mg', 'Atorvastatin 20 mg']) }, subject });
+    if (i % 2) continue; // half the list has recent results; the rest feed the recall list below
     const hba1c = 38 + Math.floor(R() * 40);
     const obs = {
       resourceType: 'Observation', status: 'final', category: [{ coding: [{ code: 'laboratory' }] }], code: { coding: [{ system: LAB.loinc, code: '4548-4', display: 'HbA1c' }], text: 'HbA1c' },
@@ -64,6 +69,20 @@ export async function seed(db: Db) {
     await afterWrite(db, 'Observation', o, true, system);
     await create(db, 'Observation', { resourceType: 'Observation', status: 'final', category: [{ coding: [{ code: 'vital-signs' }] }], code: { coding: [{ system: LAB.loinc, code: '8480-6', display: 'Systolic BP' }], text: 'Systolic BP' }, subject, effectiveDateTime: new Date(now - R() * 30 * 86400_000).toISOString(), valueQuantity: { value: 105 + Math.floor(R() * 60), unit: 'mmHg' } });
   }
+
+  // Long-term conditions whose monitoring has lapsed or is coming due.
+  const lapsed: Array<[number, string, string | null, number]> = [[7, 'Type 2 diabetes', 'HbA1c', 260], [11, 'Type 2 diabetes', null, 0], [13, 'Hypertension', 'Systolic BP', 400], [17, 'Chronic kidney disease stage 3', null, 0], [19, 'Type 2 diabetes', 'HbA1c', 170]];
+  for (const [i, condition, test, daysAgo] of lapsed) {
+    const subject = { reference: `Patient/${patients[i].id}`, display: patients[i].name };
+    await create(db, 'Condition', { resourceType: 'Condition', clinicalStatus: { coding: [{ code: 'active' }] }, code: { text: condition }, subject });
+    if (test) await create(db, 'Observation', { resourceType: 'Observation', status: 'final', category: [{ coding: [{ code: test === 'HbA1c' ? 'laboratory' : 'vital-signs' }] }], code: { text: test }, subject, effectiveDateTime: new Date(now - daysAgo * 86400_000).toISOString(), valueQuantity: test === 'HbA1c' ? { value: 52, unit: 'mmol/mol' } : { value: 148, unit: 'mmHg' } });
+  }
+
+  // Alert history: one rule clinicians override every time, for the alert review.
+  for (let i = 0; i < 12; i++)
+    await db.query('insert into alert_log(at,user_id,patient_id,rule,severity,overridden) values ($1,$2,$3,$4,$5,$6)', [new Date(now - i * 6 * 86400_000).toISOString(), null, patients[i].id, 'interaction: spironolactone with ramipril', 'high', true]);
+  for (let i = 0; i < 12; i++)
+    await db.query('insert into override_log(at,user_id,patient_id,medication,alerts,reason) values ($1,$2,$3,$4,$5,$6)', [new Date(now - i * 6 * 86400_000).toISOString(), null, patients[i].id, 'Spironolactone 25 mg', JSON.stringify([{ kind: 'interaction', severity: 'high', message: 'spironolactone with ramipril: Risk of high potassium.' }]), 'Heart failure: potassium monitored']);
 
   // Referrals of varied age, some already booked.
   const sessions = [['mehta', 'Continence', 1], ['mehta', 'Diabetes review', 3], ['osei', 'Respiratory', 2], ['osei', 'Physiotherapy', 4]] as const;

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { useParams, useSearchParams } from 'react-router-dom';
+import { Link, useParams, useSearchParams } from 'react-router-dom';
 import { ApiError, ago, day, fullName, get, label, post, type Alert, type User } from '../api.ts';
 import { Empty, Icon, PatientBanner, Skeleton, si, useToast } from '../ui.tsx';
 
@@ -40,12 +40,15 @@ function ClinicalChart({ user }: { user: User }) {
   const clinical = ['clinician', 'nurse'].includes(user.role);
   const subject = { reference: `Patient/${id}`, display: fullName(p) };
   const restricted = p.meta?.security?.some((s: any) => s.code === 'R' || s.code === 'V');
+  const replacedBy = p.link?.find((l: any) => l.type === 'replaced-by')?.other?.reference?.replace('Patient/', '');
   const refresh = () => load();
   const series = (rows: any[], name: string) => rows.filter((o) => label(o.code) === name && typeof o.valueQuantity?.value === 'number').slice(0, 12).reverse();
   return (
     <>
       <PatientBanner p={p} allergies={c.allergies} restricted={restricted}
         extra={appt && <span className="chip info"><Icon name="today" size={12} />Visit in progress</span>} />
+      {replacedBy && <div className="banner bad"><Icon name="alert" /><div className="grow"><b>This record was merged.</b> Its notes, results and appointments now live in the record that replaced it. Do not add to this one.</div><Link className="btn primary" to={`/patients/${replacedBy}`}>Open current record</Link></div>}
+      {c.due?.length > 0 && <div className="banner info"><Icon name="today" /><div><b>Due while the patient is here:</b> {c.due.map((d: any) => `${d.rule} (${d.status === 'never' ? 'never recorded' : d.status === 'overdue' ? `${d.overdueDays} days overdue` : `due ${d.dueDate}`})`).join(' · ')}</div></div>}
       {c.flags.map((f: any) => <div key={f.id} className="banner warn"><Icon name="alert" /><div>{label(f.code)}</div></div>)}
       {reason && <div className="banner bad"><Icon name="lock" /><div>Restricted record opened for: “{reason}”. This access is logged and may be reviewed.</div></div>}
       <div className="grid stagger">

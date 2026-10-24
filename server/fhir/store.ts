@@ -119,6 +119,7 @@ export async function history(q: Db, type: string, id: string) {
 export async function vread(q: Db, type: string, id: string, version: number) {
   const r = (await q.query('select data, deleted from resource_history where type=$1 and id=$2 and version=$3', [type, id, version])).rows[0];
   if (!r) throw new FhirError(404, 'version not found');
+  if (r.deleted) throw new FhirError(410, `${type}/${id} version ${version} is a deletion`);
   return r.data;
 }
 

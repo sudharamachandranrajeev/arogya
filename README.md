@@ -2,25 +2,26 @@
 
 Arogya (आरोग्य, "health") is an open-source, FHIR-native electronic health record. It is built to remove the daily waste that clinicians, clerks, managers and patients report in existing systems.
 
-**Status: v0.2, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
+**Status: v0.3, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
 
 ## What it does today
 
 | Area | Features |
 |---|---|
 | **Today** | The clinician's day in one list: arrival, did-not-attend and *Start visit*, which opens the chart and closes the appointment when the note is signed. Allergy counts shown before you open a record |
-| **Registration** | Fuzzy patient search (name, ID, phone, date of birth), duplicate warning at registration, restricted-record flag |
+| **Registration and identity** | Fuzzy patient search (name, ID, phone, date of birth), restricted-record flag. Duplicate warning at registration and a **possible-duplicates worklist** with a transparent match score (date of birth, similar names, phone, identifier, sex). **Reversible merge**: everything is re-pointed to the kept record with history preserved, old ID numbers still find the person, and a merge can be undone |
 | **Chart** | One-call chart summary: allergies, problems, medications, vitals, results, referrals, appointments, notes. Short notes with `.dot` phrase shortcuts; drafts survive a reload; a note with unfilled `___` blanks cannot be signed. One-step vitals entry. Trend sparklines for results and vitals |
 | **Prescribing** | Allergy, interaction, duplicate-therapy and maximum-daily-dose checks. Only *high-severity* alerts interrupt; they need a logged reason to override. Override rate is a KPI |
 | **Results** | Numeric results are auto-flagged against their own reference range and critical limits. Results route to the orderer's inbox. Critical results sort first. A critical result nobody has closed within an hour is escalated to the shared results pool |
 | **Inbox** | Shared work pools (results, messages, triage, scheduling) plus personal queues. **Acknowledge all normal results in one click**; abnormal results are never bulk-closed |
+| **Recalls** | Long-term condition monitoring (for example HbA1c in diabetes, eGFR in kidney disease): who is overdue, never tested or due within a month, and whether they are already booked. Book straight from the list. The chart shows what is due while the patient is in the room. Rules and intervals are set locally |
 | **Referrals and waiting list** | Priority targets (editable), days-to-breach, breach-ordered worklist |
 | **Scheduling** | Clinic sessions generate slots. Booking is race-safe (two receptionists cannot take one slot). A cancelled or missed appointment creates a *fill this slot* task with ranked waiting-list candidates |
 | **No-show risk** | Transparent score with the reasons shown to the scheduler |
-| **Dashboard** | Waiting list size, average and longest wait, breaches, DNA and cancellation rates, lost slots, inbox age and overdue work, result turnaround, alert overrides. A *stuck work* board lists unclaimed and overdue tasks. Per-rule alert analytics flag rules that are almost always overridden |
+| **Dashboard** | Waiting list size, average and longest wait, breaches, DNA and cancellation rates, lost slots, inbox age and overdue work, result turnaround, alert overrides. A *stuck work* board lists unclaimed and overdue tasks. Per-rule alert analytics flag rules that are almost always overridden; a clinician can stop a flagged rule interrupting (with a logged reason, reversible). Allergy alerts always interrupt |
 | **Security** | Role-based access, scrypt passwords, lockout, session cookies (HttpOnly, SameSite=Strict), CSRF header, **hash-chained tamper-evident audit log**, **break-glass** access with a stated reason. **Two-step verification** (TOTP), which an administrator can require per role. Sessions end after 30 idle minutes; the screen locks after 10. **Encrypted backups** (AES-256-GCM). Administrators manage users and audit but **cannot open clinical records**; they can see who opened a record |
 | **Ease of use** | Command palette (`Ctrl+K` or `/`), `g` then a letter to jump between pages, `Ctrl+Shift+L` to lock. Light and dark themes, motion that respects *reduce motion* |
-| **Interoperability** | FHIR R4 REST for 26 resource types: read, vread, create, update (with `If-Match`), delete, search, history, `CapabilityStatement`. NDJSON export |
+| **Interoperability** | FHIR R4 REST for 26 resource types: read, vread (`_history/{version}`), create, update (with `If-Match`), delete, search, history, `CapabilityStatement`. NDJSON export |
 
 Details of the research behind these choices: [docs/research/user-pain-points.md](docs/research/user-pain-points.md) and [docs/research/feature-inventory.md](docs/research/feature-inventory.md). The mapping and what is still missing: [docs/ROADMAP.md](docs/ROADMAP.md).
 

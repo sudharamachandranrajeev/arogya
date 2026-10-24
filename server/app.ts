@@ -7,11 +7,13 @@ import type { Db } from './db.ts';
 import { audit, verifyChain } from './audit.ts';
 import { can, changePassword, confirmMfa, createUser, disableMfa, login, logout, ROLES, startMfa, userForToken, type Role, type User } from './auth.ts';
 import { backup } from './backup.ts';
-import { checkMedication } from './cds.ts';
+import { applyTuning, checkMedication, ruleOf } from './cds.ts';
 import { afterWrite, backfillCandidates, beforeWrite, dnaRisk, getSetting, setSetting, waitingList, DEFAULT_TARGET_DAYS } from './domain.ts';
 import * as store from './fhir/store.ts';
 import { SearchError } from './fhir/search.ts';
+import { dismiss, duplicates, LIKELY, merge, person, score, unmerge } from './identity.ts';
 import { kpis } from './kpi.ts';
+import { DEFAULT_RECALLS, recalls, validRules } from './recall.ts';
 import { book, dnaRiskMany, slots, today } from './scheduling.ts';
 
 declare module 'fastify' { interface FastifyRequest { user: User | null; token?: string } }
@@ -202,13 +204,21 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     return { resourceType: 'Bundle', type: 'history', total: rows.length, entry: rows.map((r: any) => ({ resource: r.data, request: { method: r.op.toUpperCase() } })) };
   });
 
-  /** A rule is the alert kind plus the drugs or classes involved, without patient detail. */
-  const ruleOf = (a: { kind: string; message: string }) => `${a.kind}: ${a.message.split(':')[0].replace(/\d+(\.\d+)? mg\/day exceeds.*for /, 'max dose ')}`;
+  app.get('/fhir/:type/:id/_history/:vid', async (req) => {
+    const type = typeOf(req); guard(req, 'read', type);
+    const { id, vid } = req.params as any;
+    const res = await store.vread(db, type, id, Number(vid));
+    const pid = store.patientOf(res);
+    const reason = await breakGlass(req, pid);
+    await log(req, 'vread', { type, id, patientId: pid, reason, detail: { version: Number(vid) } });
+    return res;
+  });
+
   const medGate = async (req: FastifyRequest, body: any, id?: string) => {
     if (body?.resourceType !== 'MedicationRequest' || body.status !== 'active') return;
     const pid = store.patientOf(body);
     if (!pid) return;
-    const alerts = await checkMedication(db, pid, body, id);
+    const alerts = await applyTuning(db, await checkMedication(db, pid, body, id));
     const high = alerts.filter((a) => a.severity === 'high');
     if (!high.length) return;
     const reason = String(req.headers['x-override-reason'] ?? '').trim();
@@ -265,8 +275,9 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
       s('Appointment', { _sort: '-date', _count: '20' }), s('ServiceRequest', { status: 'active' }), s('Encounter', { _sort: '-date', _count: '10' }),
       s('Composition', { _sort: '-date', _count: '10' }), s('Flag', { status: 'active' }),
     ]);
+    const due = await recalls(db, id);
     await log(req, 'open-chart', { type: 'Patient', id, patientId: id, reason });
-    return { patient, allergies, problems, meds, vitals, labs, appts, referrals, encounters, notes, flags };
+    return { patient, allergies, problems, meds, vitals, labs, appts, referrals, encounters, notes, flags, due };
   });
 
   app.get('/api/patients/:id/dna-risk', async (req) => {
@@ -276,6 +287,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
 
   // ---------- registration ----------
   app.get('/api/search/patients', async (req) => {
+    guard(req, 'read', 'Patient');
     const q = String((req.query as any).q ?? '').trim();
     if (q.length < 2) return [];
     const seen = new Map<string, any>();
@@ -289,24 +301,94 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
       } else add((await store.search(db, 'Patient', { name: w, _count: '30' })).resources);
     }
     const words = q.toLowerCase().split(/\s+/);
-    const score = (p: any) => words.filter((w) => JSON.stringify([p.name, p.identifier, p.telecom, p.birthDate]).toLowerCase().includes(w)).length;
+    const rank = (p: any) => words.filter((w) => JSON.stringify([p.name, p.identifier, p.telecom, p.birthDate]).toLowerCase().includes(w)).length;
     await log(req, 'search-patients', { detail: { q: q.replace(/\w/g, '*') } });
-    return [...seen.values()].sort((a, b) => score(b) - score(a)).slice(0, 25);
+    // A merged record is reachable through the record that replaced it, which carries its old identifiers.
+    return [...seen.values()].filter((p) => !p.link?.some((l: any) => l.type === 'replaced-by'))
+      .sort((a, b) => rank(b) - rank(a)).slice(0, 25);
   });
 
   app.post('/api/patients/check-duplicate', async (req) => {
-    const b = req.body as { family?: string; given?: string; birthDate?: string; identifier?: string };
-    const out = new Map<string, any>();
-    if (b.identifier) (await store.search(db, 'Patient', { identifier: b.identifier })).resources.forEach((r) => out.set(r.id, { ...r, why: 'same identifier' }));
-    if (b.family && b.birthDate) (await store.search(db, 'Patient', { family: b.family, birthdate: b.birthDate })).resources.forEach((r) => out.set(r.id, { ...r, why: 'same surname and date of birth' }));
-    return [...out.values()];
+    guard(req, 'read', 'Patient');
+    const b = req.body as { family?: string; given?: string; birthDate?: string; identifier?: string; phone?: string; gender?: string };
+    const found = new Map<string, any>();
+    const add = async (q: Record<string, string>) => (await store.search(db, 'Patient', { ...q, _count: '50' })).resources.forEach((r) => found.set(r.id, r));
+    if (b.identifier) await add({ identifier: b.identifier });
+    if (b.birthDate) await add({ birthdate: b.birthDate });
+    if (b.family) await add({ family: b.family });
+    if (b.phone) await add({ phone: b.phone });
+    const me = person({ name: [{ family: b.family, given: [b.given] }], birthDate: b.birthDate, gender: b.gender,
+      identifier: b.identifier ? [{ system: 'urn:arogya:mrn', value: b.identifier }] : [], telecom: b.phone ? [{ system: 'phone', value: b.phone }] : [] });
+    // At the desk, warn on weaker evidence than the duplicates worklist uses: a missed duplicate costs more than a second look.
+    return [...found.values()].filter((p) => p.active !== false && !p.link?.some((l: any) => l.type === 'replaced-by'))
+      .map((p) => { const m = score(me, person(p)); return { ...p, score: m.score, why: m.why.join(', ') }; })
+      .filter((p) => p.score >= LIKELY - 0.1)
+      .sort((x, y) => y.score - x.score).slice(0, 10);
+  });
+
+  // ---------- identity: duplicates and merge ----------
+  app.get('/api/duplicates', async (req) => {
+    need(req, 'reception', 'clinician');
+    const list = await duplicates(db);
+    await log(req, 'duplicates-list', { detail: { pairs: list.length } });
+    return list;
+  });
+  app.post('/api/duplicates/dismiss', async (req) => {
+    const u = need(req, 'reception', 'clinician');
+    const b = req.body as { a?: string; b?: string };
+    if (!b?.a || !b?.b) throw new store.FhirError(400, 'a and b required');
+    await dismiss(db, b.a, b.b, u.id);
+    await log(req, 'not-duplicate', { type: 'Patient', id: b.a, patientId: b.a, detail: { other: b.b } });
+    return { ok: true };
+  });
+  app.post('/api/patients/merge', async (req) => {
+    const u = need(req, 'reception', 'clinician');
+    const b = req.body as { keepId?: string; mergeId?: string; reason?: string };
+    const reason = String(b?.reason ?? '').trim();
+    if (!b?.keepId || !b?.mergeId) throw new store.FhirError(400, 'keepId and mergeId required');
+    if (reason.length < 10) throw new store.FhirError(422, 'Say how you confirmed these are the same person (at least 10 characters)');
+    const r = await merge(db, b.keepId, b.mergeId, reason, u.id);
+    await log(req, 'patient-merge', { type: 'Patient', id: b.keepId, patientId: b.keepId, reason, detail: { merged: b.mergeId, moved: r.moved } });
+    await log(req, 'patient-merge', { type: 'Patient', id: b.mergeId, patientId: b.mergeId, reason, detail: { into: b.keepId } });
+    return r;
+  });
+  app.get('/api/merges', async (req) => {
+    need(req, 'reception', 'clinician');
+    return (await db.query(
+      `select m.id, m.keep_id, m.merged_id, m.reason, m.at, m.undone_at, jsonb_array_length(m.moved) moved, u.name by_name,
+       k.data->'name'->0 keep_name, g.data->'name'->0 merged_name from merge_log m left join users u on u.id=m.user_id
+       left join resources k on k.type='Patient' and k.id=m.keep_id left join resources g on g.type='Patient' and g.id=m.merged_id
+       order by m.at desc limit 50`)).rows;
+  });
+  app.post('/api/merges/:id/undo', async (req) => {
+    const u = need(req, 'reception', 'clinician');
+    const r = await unmerge(db, (req.params as any).id, u.id);
+    await log(req, 'patient-unmerge', { type: 'Patient', id: r.keepId, patientId: r.keepId, detail: { restored: r.mergedId } });
+    await log(req, 'patient-unmerge', { type: 'Patient', id: r.mergedId, patientId: r.mergedId });
+    return r;
+  });
+
+  // ---------- recalls ----------
+  app.get('/api/recalls', async (req) => {
+    need(req, 'clinician', 'nurse', 'reception', 'manager');
+    const list = await recalls(db);
+    await log(req, 'recall-list', { detail: { rows: list.length } });
+    return list;
+  });
+  app.get('/api/settings/recalls', async (req) => { need(req, 'clinician', 'nurse', 'reception', 'manager', 'admin'); return getSetting(db, 'recalls', DEFAULT_RECALLS); });
+  app.put('/api/settings/recalls', async (req) => {
+    need(req, 'clinician', 'manager');
+    if (!validRules(req.body)) throw new store.FhirError(422, 'Each rule needs an id, a name, condition and test terms, and a whole number of days (1 to 3650)');
+    await setSetting(db, 'recalls', req.body);
+    await log(req, 'settings-update', { detail: { recalls: (req.body as any[]).map((r) => `${r.id}:${r.everyDays}`) } });
+    return { ok: true };
   });
 
   // ---------- meds ----------
   app.post('/api/meds/check', async (req) => {
     need(req, 'clinician', 'nurse');
     const b = req.body as { patientId: string; medication: any };
-    return { alerts: await checkMedication(db, b.patientId, b.medication) };
+    return { alerts: await applyTuning(db, await checkMedication(db, b.patientId, b.medication)) };
   });
 
   // ---------- inbox ----------
@@ -420,8 +502,28 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     const rows = (await db.query(
       `select rule, severity, count(*)::int fired, count(*) filter (where overridden)::int overridden from alert_log
        where at > now() - interval '180 days' group by rule, severity order by fired desc limit 100`)).rows;
+    const quiet = new Map((await db.query('select t.rule, t.reason, t.at, u.name from alert_tuning t left join users u on u.id=t.user_id')).rows.map((q: any) => [q.rule, q]));
     // A rule overridden almost every time is noise that trains people to ignore alerts: flag it for review.
-    return rows.map((r) => ({ ...r, overridePct: Math.round((r.overridden / r.fired) * 1000) / 10, review: r.fired >= 10 && r.overridden / r.fired > 0.95 }));
+    const out = rows.map((r) => ({ ...r, overridePct: Math.round((r.overridden / r.fired) * 1000) / 10, review: r.fired >= 10 && r.overridden / r.fired > 0.95, quiet: quiet.get(r.rule) ?? null }));
+    for (const [rule, q] of quiet) if (!out.some((r) => r.rule === rule)) out.push({ rule, severity: 'high', fired: 0, overridden: 0, overridePct: 0, review: false, quiet: q });
+    return out;
+  });
+  app.post('/api/safety/alert-rules/quiet', async (req) => {
+    const u = need(req, 'clinician');
+    const b = req.body as { rule?: string; reason?: string };
+    const rule = String(b?.rule ?? ''), reason = String(b?.reason ?? '').trim();
+    if (!/^(interaction|dose|duplicate): /.test(rule)) throw new store.FhirError(422, 'Only interaction, dose and duplicate rules can stop interrupting. Allergy alerts always interrupt.');
+    if (reason.length < 10) throw new store.FhirError(422, 'Give the clinical reason (at least 10 characters)');
+    await db.query('insert into alert_tuning(rule,user_id,reason) values ($1,$2,$3) on conflict (rule) do update set user_id=excluded.user_id, reason=excluded.reason, at=now()', [rule, u.id, reason]);
+    await log(req, 'alert-rule-quietened', { reason, detail: { rule } });
+    return { ok: true };
+  });
+  app.post('/api/safety/alert-rules/restore', async (req) => {
+    need(req, 'clinician');
+    const rule = String((req.body as any)?.rule ?? '');
+    await db.query('delete from alert_tuning where rule=$1', [rule]);
+    await log(req, 'alert-rule-restored', { detail: { rule } });
+    return { ok: true };
   });
 
   app.get('/api/stuck-work', async (req) => {
