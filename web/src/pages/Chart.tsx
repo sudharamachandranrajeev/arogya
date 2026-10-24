@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
-import { Link, useParams, useSearchParams } from 'react-router-dom';
-import { ApiError, ago, day, fullName, get, label, post, type Alert, type User } from '../api.ts';
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom';
+import { Steps } from './Referrals.tsx';
+import { ApiError, ago, api, day, fullName, get, label, post, time, type Alert, type User } from '../api.ts';
 import { Empty, Icon, PatientBanner, Skeleton, si, useToast } from '../ui.tsx';
 
 const PHRASES: Record<string, string> = {
@@ -17,6 +18,7 @@ const VITALS: Array<[string, string, string, string, string]> = [
 
 export function Chart({ user }: { user: User }) {
   if (user.role === 'admin') return <AccessReport />;
+  if (user.role === 'reception') return <DeskRecord user={user} />;
   return <ClinicalChart user={user} />;
 }
 
@@ -90,7 +92,7 @@ function ClinicalChart({ user }: { user: User }) {
           {c.referrals.map((r: any) => <div key={r.id} className="list-item"><Icon name={outbound(r) ? 'send' : 'list'} size={15} />{label(r.code)}{outbound(r) && <span className="muted small">to {r.performer?.[0]?.display}</span>}{outbound(r) && <span className="chip info">{r.extension?.find((e: any) => e.url === 'urn:arogya:referral-stage')?.valueCode ?? 'sent'}</span>}<span className={`chip ${r.priority === 'routine' ? '' : 'warn'}`}>{r.priority}</span><span className="muted small" style={{ marginLeft: 'auto' }}>{ago(r.authoredOn ?? r.meta.lastUpdated)} ago</span></div>)}
           {c.appts.slice(0, 5).map((a: any) => <div key={a.id} className="list-item"><Icon name="today" size={15} />{day(a.start)} {a.start.slice(11, 16)}<span className="chip">{a.status}</span></div>)}
           {!c.referrals.length && !c.appts.length && <div className="muted">None</div>}
-          {clinical && <Refer subject={subject} done={refresh} />}
+          {clinical && <Refer subject={subject} hdr={hdr} done={refresh} />}
         </div>
       </div>
       {clinical && <NoteBox subject={subject} user={user} appt={appt} done={() => { if (appt) setParams({}); refresh(); }} />}
@@ -168,7 +170,7 @@ function Prescribe({ patientId, subject, hdr, done }: { patientId: string; subje
   const toast = useToast();
   useEffect(() => {
     if (drug.length < 4) { setAlerts([]); return; }
-    const t = setTimeout(() => post('/api/meds/check', { patientId, medication: { medicationCodeableConcept: { text: drug } } }).then((r) => setAlerts(r.alerts)), 250);
+    const t = setTimeout(() => post('/api/meds/check', { patientId, medication: { medicationCodeableConcept: { text: drug } } }, hdr).then((r) => setAlerts(r.alerts)), 250);
     return () => clearTimeout(t);
   }, [drug]);
   const high = alerts.some((a) => a.severity === 'high');
@@ -191,7 +193,7 @@ function Prescribe({ patientId, subject, hdr, done }: { patientId: string; subje
 
 const outbound = (r: any) => r.category?.some((c: any) => c.coding?.some((k: any) => k.code === 'referral-out'));
 
-function Refer({ subject, done }: { subject: any; done: () => void }) {
+function Refer({ subject, hdr, done }: { subject: any; hdr?: Record<string, string>; done: () => void }) {
   const [open, setOpen] = useState(false);
   const [f, setF] = useState({ service: '', priority: 'routine', reason: '', to: '' });
   const [away, setAway] = useState(false);
@@ -208,8 +210,10 @@ function Refer({ subject, done }: { subject: any; done: () => void }) {
       <label>Priority<select value={f.priority} onChange={(e) => setF({ ...f, priority: e.target.value })}><option>routine</option><option>urgent</option><option>asap</option><option>stat</option></select></label>
       <label style={{ width: '100%' }}>Reason<input value={f.reason} onChange={(e) => setF({ ...f, reason: e.target.value })} /></label>
       <button className="primary" disabled={!f.service || (away && !f.to.trim())} onClick={async () => {
-        if (away) await post('/api/referrals-out', { patientId: subject.reference.slice(8), patientName: subject.display, to: f.to, service: f.service, priority: f.priority, reason: f.reason || undefined });
-        else await post('/fhir/ServiceRequest', { resourceType: 'ServiceRequest', status: 'active', intent: 'order', category: [{ text: 'referral' }], priority: f.priority, code: { text: f.service }, reasonCode: f.reason ? [{ text: f.reason }] : undefined, subject, authoredOn: new Date().toISOString() });
+        try {
+          if (away) await post('/api/referrals-out', { patientId: subject.reference.slice(8), patientName: subject.display, to: f.to, service: f.service, priority: f.priority, reason: f.reason || undefined }, hdr);
+          else await post('/fhir/ServiceRequest', { resourceType: 'ServiceRequest', status: 'active', intent: 'order', category: [{ text: 'referral' }], priority: f.priority, code: { text: f.service }, reasonCode: f.reason ? [{ text: f.reason }] : undefined, subject, authoredOn: new Date().toISOString() }, hdr);
+        } catch (e: any) { toast(e.message, 'bad'); return; }
         toast(away ? `Referred to ${f.to}: tracked until the report comes back` : `Referred to ${f.service}`); setOpen(false); setF({ service: '', priority: 'routine', reason: '', to: '' }); done();
       }}>Send referral</button>
       <button className="ghost" onClick={() => setOpen(false)}>Cancel</button>
@@ -249,6 +253,64 @@ function NoteBox({ subject, user, appt, done }: { subject: any; user: User; appt
         <span className="muted small">{words} words{blanks > 0 && <span style={{ color: 'var(--warn)' }}> · fill {blanks} blank{blanks > 1 ? 's' : ''} (___) before signing</span>}</span>
       </div>
     </div>
+  );
+}
+
+/** Reception's view of a patient: who they are, how to reach them, their appointments and referrals being chased. No clinical content. */
+function DeskRecord({ user }: { user: User }) {
+  const { id } = useParams();
+  const [d, setD] = useState<any>(null);
+  const [err, setErr] = useState('');
+  const [reason, setReason] = useState('');
+  const [askReason, setAskReason] = useState(false);
+  const nav = useNavigate();
+  const toast = useToast();
+  const hdr = reason ? { 'x-break-glass-reason': reason } : undefined;
+  const load = (h = hdr) => get(`/api/patients/${id}/desk`, h).then((x) => { setD(x); setAskReason(false); }).catch((e: ApiError) => {
+    if (e.status === 403 && /Restricted/.test(e.message)) setAskReason(true); else setErr(e.message);
+  });
+  useEffect(() => { setD(null); setErr(''); setReason(''); load(undefined); }, [id]);
+  if (err) return <div className="banner bad"><Icon name="alert" /><div>{err}</div></div>;
+  if (askReason) return <BreakGlass onGo={(r) => { setReason(r); load({ 'x-break-glass-reason': r }); }} />;
+  if (!d) return <div className="card"><Skeleton rows={6} /></div>;
+  const p = d.patient;
+  const restricted = p.meta?.security?.some((s: any) => s.code === 'R' || s.code === 'V');
+  const phone = p.telecom?.find((t: any) => t.system === 'phone')?.value;
+  const email = p.telecom?.find((t: any) => t.system === 'email')?.value;
+  const now = Date.now();
+  const upcoming = d.appts.filter((a: any) => Date.parse(a.start) > now && a.status === 'booked').reverse();
+  const past = d.appts.filter((a: any) => !upcoming.includes(a)).slice(0, 8);
+  const toggle = () => api('PUT', `/api/patients/${id}/reminders`, { off: !d.remindersOff }, hdr)
+    .then((r) => { toast(r.off ? 'Text reminders turned off for this patient' : 'Text reminders turned on'); load(); }).catch((e) => toast(e.message, 'bad'));
+  const book = () => nav(`/schedule?${new URLSearchParams({ patient: p.id, name: fullName(p) })}`);
+  const line = (a: any) => `${day(a.start)} ${time(a.start)} · ${a.serviceType?.[0]?.text ?? 'Appointment'}`;
+  return (
+    <>
+      <PatientBanner p={p} restricted={restricted} />
+      {reason && <div className="banner bad"><Icon name="lock" /><div>Restricted record opened for: “{reason}”. This access is logged and may be reviewed.</div></div>}
+      <div className="grid stagger">
+        <div className="card lift" style={si(0)}>
+          <h3>Contact</h3>
+          <div className="list-item"><b style={{ width: 70 }}>Phone</b>{phone ?? <span className="muted">none recorded</span>}</div>
+          <div className="list-item"><b style={{ width: 70 }}>Email</b>{email ?? <span className="muted">none recorded</span>}</div>
+          <div className="list-item"><b style={{ width: 70 }}>Address</b>{p.address?.[0] ? [p.address[0].line?.join(', '), p.address[0].city, p.address[0].postalCode].filter(Boolean).join(', ') : <span className="muted">none recorded</span>}</div>
+          <div className="list-item" style={{ flexWrap: 'wrap' }}><b style={{ width: 70 }}>Texts</b>
+            <span className={`chip ${d.remindersOff ? '' : 'ok'}`}>{d.remindersOff ? 'No reminders' : 'Gets reminders'}</span>
+            <button className="sm ghost" style={{ marginLeft: 'auto' }} onClick={toggle}>{d.remindersOff ? 'Turn reminders on' : 'Turn reminders off'}</button></div>
+        </div>
+        <div className="card lift" style={si(1)}>
+          <h3>Appointments <button className="sm primary" style={{ marginLeft: 'auto' }} onClick={book}><Icon name="plus" size={14} />Book</button></h3>
+          {upcoming.map((a: any) => <div key={a.id} className="list-item">{line(a)}{a.extension?.some((e: any) => e.url === 'urn:arogya:patient-confirmed') && <span className="chip ok" style={{ marginLeft: 'auto' }}><Icon name="check" size={12} />Confirmed</span>}</div>)}
+          {!upcoming.length && <div className="muted">Nothing booked</div>}
+          {past.length > 0 && <><div className="muted small section">Earlier</div>{past.map((a: any) => <div key={a.id} className="list-item muted">{line(a)}<span className="chip" style={{ marginLeft: 'auto' }}>{a.status === 'noshow' ? 'did not attend' : a.status === 'fulfilled' ? 'seen' : a.status}</span></div>)}</>}
+        </div>
+        {d.referralsOut.length > 0 && <div className="card lift" style={si(2)}>
+          <h3>Referrals being chased</h3>
+          {d.referralsOut.map((r: any) => <div key={r.id} className="section"><div className="row"><b className="grow">{r.to}</b><span className={`chip ${r.overdueDays ? 'bad' : ''}`}>{r.overdueDays ? `${r.overdueDays} d late` : `due ${r.dueDate}`}</span></div><Steps stage={r.stage} /></div>)}
+          {['clinician', 'nurse', 'reception'].includes(user.role) && <Link to="/referrals" className="btn sm" style={{ marginTop: 8 }}>Update on Referrals out</Link>}
+        </div>}
+      </div>
+    </>
   );
 }
 

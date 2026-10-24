@@ -53,7 +53,11 @@ export async function login(db: Db, username: string, password: string, ip: stri
   if (!row || !ok) throw fail('Wrong username or password');
   if (row.totp_secret) {
     if (!code) throw new FhirError(401, 'Enter the 6-digit code from your authenticator app', { mfaRequired: true });
-    const step = verifyTotp(unseal(row.totp_secret), code);
+    let secret: string;
+    try { secret = unseal(row.totp_secret); } catch {
+      throw new FhirError(503, 'Two-step verification cannot be checked: this server has a different application key than the one your code was set up with. An administrator can run "node server/main.ts reset-mfa <username>".');
+    }
+    const step = verifyTotp(secret, code);
     // A code is single-use: replaying an observed code inside its 30 s window is refused.
     if (step === null || (row.totp_last_step !== null && step <= Number(row.totp_last_step))) throw fail('Wrong or reused code');
     await db.query('update users set totp_last_step=$2 where id=$1', [row.id, step]);

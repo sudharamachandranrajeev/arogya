@@ -2,7 +2,7 @@
 
 Arogya (आरोग्य, "health") is an open-source, FHIR-native electronic health record. It is built to remove the daily waste that clinicians, clerks, managers and patients report in existing systems.
 
-**Status: v0.4, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
+**Status: v0.5, pre-release.** It is a working foundation for outpatient and community care. It is **not** certified, has not had a clinical safety review, and must not hold real patient data until your organisation has done its own safety, security and governance assessment. See [SECURITY.md](SECURITY.md).
 
 ## What it does today
 
@@ -16,6 +16,8 @@ Arogya (आरोग्य, "health") is an open-source, FHIR-native electronic 
 | **Inbox** | Shared work pools (results, messages, triage, scheduling) plus personal queues. **Acknowledge all normal results in one click**; abnormal results are never bulk-closed |
 | **Referrals out** | Referrals to other providers are tracked through sent, acknowledged, booked and report received. Silence past a deadline (editable) creates one chase task for the admin team; recording the reply closes it. A rejection goes back to the referrer as an urgent task |
 | **Appointment reminders** | Text reminders a set number of hours before, sent through your SMS gateway (signed JSON webhook, retried up to three times). Messages carry date, time and clinic only. Restricted records, patients without a phone, and patients who opted out (`urn:arogya:no-reminders` extension on Patient) are skipped, with the reason shown in the outbox |
+| **Two-way replies and desk view** | With replies on, a patient's text answers the reminder: C confirms (shown on Today), X cancels and offers the slot to the waiting list, STOP ends reminders, anything else goes to reception's inbox. Reception gets a desk view of each patient (contact, appointments, referrals being chased) with no clinical content, and can switch reminders off or on. |
+| **Integrity** | A daily and on-demand check of the audit chain and its head, search index, version history, references between records, open work, double bookings, keys and backups, with a one-click index rebuild. `node server/main.ts check` runs it from the command line. |
 | **Recalls** | Long-term condition monitoring (for example HbA1c in diabetes, eGFR in kidney disease): who is overdue, never tested or due within a month, and whether they are already booked. Book straight from the list. The chart shows what is due while the patient is in the room. Rules and intervals are set locally |
 | **Referrals and waiting list** | Priority targets (editable), days-to-breach, breach-ordered worklist |
 | **Scheduling** | Clinic sessions generate slots. Booking is race-safe (two receptionists cannot take one slot). A cancelled or missed appointment creates a *fill this slot* task with ranked waiting-list candidates |
@@ -44,6 +46,8 @@ A real site:
 ```sh
 AROGYA_ADMIN_PASSWORD='at-least-12-characters' DATABASE_URL=postgres://… AROGYA_SECURE_COOKIES=1 npm start
 node server/main.ts adduser jsmith nurse "Jo Smith" 'a-long-password'
+node server/main.ts check                 # integrity report; exits 1 on a failure
+node server/main.ts reset-mfa jsmith      # after restoring onto a server without the old key file
 AROGYA_BACKUP_PASSPHRASE='…' node server/main.ts backup site.arogya-backup
 AROGYA_BACKUP_PASSPHRASE='…' node server/main.ts restore site.arogya-backup   # into an empty database only
 ```

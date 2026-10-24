@@ -241,3 +241,14 @@ button.sm, .btn.sm { white-space: nowrap; }
 .step .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--line-2); flex: none; }
 .step.done .dot { background: var(--brand); }
 .step.next .dot { background: var(--panel); box-shadow: 0 0 0 2px var(--brand); animation: pulse 2s var(--ease) infinite; }
+
+/* System integrity checks */
+.checks { display: grid; gap: 6px; }
+.check { display: flex; gap: 10px; align-items: flex-start; padding: 9px 12px; border-radius: var(--r-1); border: 1px solid var(--line); transition: background var(--t-2) var(--ease); }
+.check .dot { margin-top: 6px; flex: none; }
+.check.fail { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); background: color-mix(in srgb, var(--bad) 6%, transparent); }
+.check.warn { border-color: color-mix(in srgb, var(--warn) 45%, var(--line)); }
+.check details { margin-top: 4px; }
+.check summary { cursor: pointer; color: var(--muted); }
+.check ul { margin: 4px 0 0; padding-left: 18px; overflow-wrap: anywhere; }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }

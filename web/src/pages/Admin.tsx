@@ -99,6 +99,7 @@ export function Admin({ user }: { user: User }) {
           </div>
         </div>
       </div>
+      <Integrity />
       <Reminders />
 
       <div className="card section">
@@ -111,6 +112,39 @@ export function Admin({ user }: { user: User }) {
         </table></div>
       </div>
     </>
+  );
+}
+
+const TONE: Record<string, string> = { ok: 'ok', warn: 'warn', fail: 'bad' };
+
+/** System integrity: the last check (the server runs one daily), a button to run one now, and the one safe automatic repair. */
+function Integrity() {
+  const [r, setR] = useState<any>(undefined);
+  const [busy, setBusy] = useState(false);
+  const toast = useToast();
+  useEffect(() => { get('/api/admin/integrity').then(setR); }, []);
+  const run = async () => { setBusy(true); try { setR(await post('/api/admin/integrity')); } catch (e: any) { toast(e.message, 'bad'); } setBusy(false); };
+  const reindex = async () => {
+    setBusy(true);
+    try { const x = await post('/api/admin/integrity/reindex'); toast(`Search index rebuilt for ${x.reindexed} records`); setR(await post('/api/admin/integrity')); } catch (e: any) { toast(e.message, 'bad'); }
+    setBusy(false);
+  };
+  return (
+    <div className="card section">
+      <h3><Icon name="shield" size={14} /> System integrity
+        {r && <span className={`chip ${TONE[r.status]}`}>{r.status === 'ok' ? 'all checks pass' : r.status === 'warn' ? 'needs attention' : 'problems found'}</span>}
+        <button className="sm" style={{ marginLeft: 'auto' }} disabled={busy} onClick={run}>{busy ? 'Checking…' : 'Run check now'}</button></h3>
+      <div className="muted small" style={{ marginBottom: 8 }}>Checks the audit trail, search index, version history, references between records, open work, double bookings, keys and backups. It runs every day; results name record ids only.
+        {r && <> Last run {String(r.at).slice(0, 16).replace('T', ' ')} in {r.ms} ms.</>}</div>
+      {r === undefined ? <Skeleton rows={4} /> : !r ? <div className="muted">No check has run yet.</div> : <div className="checks stagger">{r.checks.map((c: any, i: number) => (
+        <div key={c.key} className={`check ${c.status}`} style={si(i)}>
+          <span className={`dot ${TONE[c.status]}`} />
+          <div className="grow"><b>{c.name}</b> <span className="muted">{c.summary}</span>
+            {c.items?.length > 0 && <details><summary className="small">{c.items.length} shown</summary><ul className="small mono">{c.items.map((x: string) => <li key={x}>{x}</li>)}</ul></details>}</div>
+          {c.key === 'index' && c.status !== 'ok' && <button className="sm primary" disabled={busy} onClick={reindex}>Rebuild index</button>}
+        </div>))}</div>}
+      {r?.anchor && <div className="muted small section">Audit head <code>#{r.anchor.seq} {r.anchor.hash.slice(0, 16)}…</code> — keep a copy of this outside the server; a later check must still contain it.</div>}
+    </div>
   );
 }
 
@@ -135,7 +169,9 @@ function Reminders() {
         <label className="grow">Gateway URL (https)<input value={f.webhookUrl} onChange={set('webhookUrl')} placeholder="https://sms.example.org/send" /></label>
         <label>Clinic name<input value={f.clinicName} onChange={set('clinicName')} /></label>
         <label>Clinic phone<input value={f.clinicPhone} onChange={set('clinicPhone')} /></label>
+        <label className="radio"><input type="checkbox" checked={!!f.twoWay} onChange={set('twoWay')} />Patients can reply</label>
       </div>
+      {f.twoWay && <div className="muted small" style={{ marginTop: 8 }}>Replies: your gateway POSTs <code>{'{messageId, inReplyTo, from, text}'}</code> to <code>{location.origin}/api/reminders/reply</code> with <code>X-Arogya-Timestamp</code> (Unix seconds) and <code>X-Arogya-Signature</code> = HMAC-SHA256 of <code>timestamp.body</code>. C confirms, X cancels and offers the slot to the waiting list, STOP ends reminders; anything else goes to reception's inbox.</div>}
       {secret && <div className="banner warn" style={{ marginTop: 10 }}><Icon name="lock" /><div>Signing secret, shown once. Put it in your gateway now: <code className="secret">{secret}</code></div></div>}
       <div className="row" style={{ marginTop: 10 }}>
         <button className="primary" onClick={() => save()}>Save</button>
@@ -145,7 +181,8 @@ function Reminders() {
       {box.length > 0 && <div className="table-wrap section"><table>
         <thead><tr><th>Appointment</th><th>Patient</th><th>Status</th></tr></thead>
         <tbody>{box.slice(0, 20).map((m) => <tr key={m.id}><td>{String(m.start ?? '').slice(0, 16).replace('T', ' ')}</td><td>{m.patient ?? ''}</td>
-          <td><span className={`chip ${m.status === 'sent' ? 'ok' : m.status === 'failed' ? 'bad' : m.status === 'skipped' ? '' : 'warn'}`}>{m.status}</span> <span className="muted small">{m.detail}</span></td></tr>)}</tbody>
+          <td><span className={`chip ${m.status === 'sent' ? 'ok' : m.status === 'failed' ? 'bad' : m.status === 'skipped' ? '' : 'warn'}`}>{m.status}</span> <span className="muted small">{m.detail}</span>
+            {m.reply && <span className={`chip ${m.reply === 'confirmed' ? 'ok' : m.reply === 'cancelled' ? 'warn' : 'info'}`} style={{ marginLeft: 6 }}>replied: {m.reply}</span>}</td></tr>)}</tbody>
       </table></div>}
     </div>
   );

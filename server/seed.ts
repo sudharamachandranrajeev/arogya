@@ -1,7 +1,7 @@
 import type { Db } from './db.ts';
 import { createUser } from './auth.ts';
 import { afterWrite, beforeWrite } from './domain.ts';
-import { create } from './fhir/store.ts';
+import { create, update } from './fhir/store.ts';
 import { localIso } from './scheduling.ts';
 import { advance, send as sendReferral } from './referrals.ts';
 
@@ -113,7 +113,7 @@ export async function seed(db: Db) {
   ];
   for (const [i, to, service, daysAgo, steps] of away) {
     const r = await sendReferral(db, { patientId: patients[i].id, patientName: patients[i].name, to, service, requester: u.mehta });
-    await db.query(`update resources set data = jsonb_set(data, '{authoredOn}', to_jsonb($2::text)) where type='ServiceRequest' and id=$1`, [r.id, new Date(now - daysAgo * 86400_000).toISOString()]);
+    await update(db, 'ServiceRequest', r.id, { ...r, authoredOn: new Date(now - daysAgo * 86400_000).toISOString() });
     for (const [stage, note] of steps) await advance(db, r.id, stage as any, note, 'Rory Reception');
   }
 

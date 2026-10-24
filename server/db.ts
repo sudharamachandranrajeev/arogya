@@ -5,6 +5,7 @@ export interface Db {
   query<T = any>(sql: string, params?: unknown[]): Promise<{ rows: T[] }>;
   /** Run several statements without parameters (migrations). */
   exec(sql: string): Promise<void>;
+  /** Run fn in a transaction. Called on a handle that is already inside one, fn joins that transaction. */
   tx<T>(fn: (q: Db) => Promise<T>): Promise<T>;
   close(): Promise<void>;
 }
@@ -24,14 +25,18 @@ export async function openMemoryDb(): Promise<Db> {
 
 function pool(url: string): Db {
   const p = new pg.Pool({ connectionString: url, max: 10 });
-  const wrap = (c: pg.Pool | pg.PoolClient): Db => ({
-    query: (sql, params) => c.query(sql, params as any[]) as any,
-    exec: async (sql) => { await c.query(sql); },
-    tx: () => Promise.reject(new Error('nested transaction')),
-    close: async () => {},
-  });
+  const wrap = (c: pg.PoolClient): Db => {
+    const q: Db = {
+      query: (sql, params) => c.query(sql, params as any[]) as any,
+      exec: async (sql) => { await c.query(sql); },
+      tx: (fn) => fn(q),
+      close: async () => {},
+    };
+    return q;
+  };
   return {
-    ...wrap(p),
+    query: (sql, params) => p.query(sql, params as any[]) as any,
+    exec: async (sql) => { await p.query(sql); },
     async tx(fn) {
       const c = await p.connect();
       try {
@@ -53,12 +58,15 @@ function pool(url: string): Db {
 async function lite(dir?: string): Promise<Db> {
   const l = dir ? new PGlite(dir) : new PGlite();
   await l.waitReady;
-  const wrap = (c: { query: PGlite['query']; exec: PGlite['exec'] }): Db => ({
-    query: (sql, params) => c.query(sql, params as any[]) as any,
-    exec: async (sql) => { await c.exec(sql); },
-    tx: () => Promise.reject(new Error('nested transaction')),
-    close: async () => {},
-  });
+  const wrap = (c: { query: PGlite['query']; exec: PGlite['exec'] }): Db => {
+    const q: Db = {
+      query: (sql, params) => c.query(sql, params as any[]) as any,
+      exec: async (sql) => { await c.exec(sql); },
+      tx: (fn) => fn(q),
+      close: async () => {},
+    };
+    return q;
+  };
   return {
     ...wrap(l),
     tx: (fn) => l.transaction((t) => fn(wrap(t as any))),
@@ -129,7 +137,17 @@ create table outbox(
   created_at timestamptz not null default now(), sent_at timestamptz, unique (appointment_id, channel));
 create index outbox_queued on outbox(status);
 `,
+  `
+create table inbound(
+  id text primary key, outbox_id text, from_addr text, body text not null, action text not null,
+  at timestamptz not null default now());
+create index inbound_outbox on inbound(outbox_id);
+alter table outbox add column claimed_at timestamptz;
+`,
 ];
+
+/** The schema version this build expects; the integrity check compares it with the database. */
+export const schemaVersion = () => MIGRATIONS.length;
 
 async function migrate(db: Db) {
   await db.query('create table if not exists schema_version(v int not null)');

@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import type { Db } from './db.ts';
 import { FhirError, create, patientOf, search } from './fhir/store.ts';
 import { dnaRisk } from './domain.ts';
+import { CONFIRMED } from './reminders.ts';
 
 export type Slot = { start: string; end: string; practitionerId: string; service: string; location: string; free: boolean };
 
@@ -47,21 +48,39 @@ export async function book(db: Db, b: { patientId: string; practitionerId: strin
   const s = Date.parse(b.start), e = Date.parse(b.end);
   if (!(e > s)) throw new FhirError(422, 'end must be after start');
   if (s < Date.now()) throw new FhirError(422, 'cannot book in the past');
+  const appt = {
+    resourceType: 'Appointment', status: 'booked', start: b.start, end: b.end, serviceType: [{ text: b.service }],
+    reasonCode: b.reason ? [{ text: b.reason }] : undefined,
+    basedOn: b.referralId ? [{ reference: `ServiceRequest/${b.referralId}` }] : undefined,
+    participant: [
+      { actor: { reference: `Patient/${b.patientId}`, display: b.patientName }, status: 'accepted' },
+      { actor: { reference: `Practitioner/${b.practitionerId}` }, status: 'accepted' },
+    ],
+  };
   return db.tx(async (t) => {
-    await t.query('select pg_advisory_xact_lock(hashtext($1))', [`appt:${b.practitionerId}`]);
-    const day = b.start.slice(0, 10);
-    const same = (await search(t, 'Appointment', { practitioner: b.practitionerId, date: day, status: 'booked,pending,arrived,fulfilled', _count: '200' })).resources;
-    if (same.some((x) => Date.parse(x.start) < e && Date.parse(x.end) > s)) throw new FhirError(409, 'That slot has just been taken');
-    return create(t, 'Appointment', {
-      resourceType: 'Appointment', status: 'booked', start: b.start, end: b.end, serviceType: [{ text: b.service }],
-      reasonCode: b.reason ? [{ text: b.reason }] : undefined,
-      basedOn: b.referralId ? [{ reference: `ServiceRequest/${b.referralId}` }] : undefined,
-      participant: [
-        { actor: { reference: `Patient/${b.patientId}`, display: b.patientName }, status: 'accepted' },
-        { actor: { reference: `Practitioner/${b.practitionerId}` }, status: 'accepted' },
-      ],
-    }, randomUUID());
+    await assertFree(t, appt);
+    return create(t, 'Appointment', appt, randomUUID());
   });
+}
+
+export const ACTIVE = ['booked', 'pending', 'arrived'];
+
+/**
+ * Refuse an active appointment that overlaps another for the same clinician. Every path that makes or moves an
+ * appointment calls this inside its write transaction; the advisory lock per clinician serialises those paths.
+ * Times are compared as timestamps, so offsets and midnight do not matter.
+ */
+export async function assertFree(t: Db, a: any, exceptId = '') {
+  if (!ACTIVE.includes(a.status)) return;
+  const refs = [...new Set<string>((a.participant ?? []).map((p: any) => p.actor?.reference).filter((r: unknown) => typeof r === 'string' && r.startsWith('Practitioner/')))].sort();
+  for (const ref of refs) {
+    await t.query('select pg_advisory_xact_lock(hashtext($1))', [`appt:${ref.slice(13)}`]);
+    const clash = (await t.query(
+      `select id from resources where type='Appointment' and not deleted and id <> $1 and data->>'status' = any($2::text[])
+       and data->'participant' @> $3::jsonb and (data->>'start')::timestamptz < $5::timestamptz and (data->>'end')::timestamptz > $4::timestamptz limit 1`,
+      [exceptId, [...ACTIVE, 'fulfilled'], JSON.stringify([{ actor: { reference: ref } }]), a.start, a.end])).rows[0];
+    if (clash) throw new FhirError(409, 'That slot has just been taken');
+  }
 }
 export { patientOf };
 
@@ -78,7 +97,7 @@ export async function today(db: Db, date?: string, practitionerId?: string) {
     const allergies = patientId ? (await search(db, 'AllergyIntolerance', { patient: patientId, status: 'active', _count: '0' })).total : 0;
     out.push({
       id: a.id, start: a.start, end: a.end, status: a.status, service: a.serviceType?.[0]?.text ?? '',
-      patientId, patientName: pRef?.display ?? '', allergies,
+      patientId, patientName: pRef?.display ?? '', allergies, confirmed: a.extension?.find((e: any) => e.url === CONFIRMED)?.valueDateTime ?? null,
       practitionerId: String(a.participant?.find((p: any) => String(p.actor?.reference).startsWith('Practitioner/'))?.actor?.reference ?? '').slice(13),
     });
   }

@@ -40,7 +40,7 @@ export async function advance(db: Db, id: string, stage: Stage, note: string, by
   const { res } = await update(db, 'ServiceRequest', id, {
     ...cur, status: stage === 'report' ? 'completed' : stage === 'rejected' ? 'revoked' : 'active',
     extension: withExt(cur, TRACK, stage), note: [...(cur.note ?? []), { text, time: new Date().toISOString(), authorString: by }],
-  });
+  }, Number(cur.meta.versionId));
   // Any chase for this referral is answered by the update.
   await db.query(`update tasks set status='done', done_at=now(), note='Answered by referral update' where ref_type='ServiceRequest' and ref_id=$1 and kind='chase' and status='open'`, [id]);
   if (stage === 'rejected')
@@ -70,9 +70,12 @@ export async function outbound(db: Db, patientId?: string) {
     const d = deadline(r, days);
     const overdue = now > d.due;
     if (overdue && ext(r, CHASED) !== stage) {
-      await db.query(`insert into tasks(id,kind,patient_id,subject,ref_type,ref_id,pool,priority) values ($1,'chase',$2,$3,'ServiceRequest',$4,'scheduling','routine')`,
-        [randomUUID(), r.subject?.reference?.slice(8) ?? null, `Chase ${r.performer?.[0]?.display}: no ${d.waitingFor.replace(/^an? |^the /, '')} for ${r.code?.text}`, r.id]);
-      await update(db, 'ServiceRequest', r.id, { ...r, extension: withExt(r, CHASED, stage) });
+      // Marked only if nobody changed the referral since it was read; otherwise the next look decides again.
+      await db.tx(async (t) => {
+        await update(t, 'ServiceRequest', r.id, { ...r, extension: withExt(r, CHASED, stage) }, Number(r.meta.versionId));
+        await t.query(`insert into tasks(id,kind,patient_id,subject,ref_type,ref_id,pool,priority) values ($1,'chase',$2,$3,'ServiceRequest',$4,'scheduling','routine')`,
+          [randomUUID(), r.subject?.reference?.slice(8) ?? null, `Chase ${r.performer?.[0]?.display}: no ${d.waitingFor.replace(/^an? |^the /, '')} for ${r.code?.text}`, r.id]);
+      }).catch((e) => { if (!(e instanceof FhirError && e.status === 412)) throw e; });
     }
     out.push({
       id: r.id, patientId: r.subject?.reference?.slice(8), patientName: r.subject?.display ?? '', to: r.performer?.[0]?.display ?? '',

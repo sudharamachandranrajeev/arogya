@@ -15,8 +15,9 @@ import { dismiss, duplicates, LIKELY, merge, person, score, unmerge } from './id
 import { kpis } from './kpi.ts';
 import { DEFAULT_RECALLS, recalls, validRules } from './recall.ts';
 import { advance, DEFAULT_REFERRAL_DAYS, outbound, send, type Stage } from './referrals.ts';
-import { reminderSettings, runReminders, saveReminderSettings } from './reminders.ts';
-import { book, dnaRiskMany, slots, today } from './scheduling.ts';
+import { handleReply, NO_REMINDERS, reminderSettings, runReminders, saveReminderSettings, verifyInbound } from './reminders.ts';
+import { lastIntegrity, rebuildIndex, runIntegrity } from './integrity.ts';
+import { ACTIVE, assertFree, book, dnaRiskMany, slots, today } from './scheduling.ts';
 
 declare module 'fastify' { interface FastifyRequest { user: User | null; token?: string } }
 
@@ -29,6 +30,8 @@ const POOLS: Record<Role, string[]> = {
   reception: ['scheduling', 'messages'], manager: ['scheduling'], biller: [],
 };
 
+/** Paths that authenticate some other way: the reply webhook carries a gateway signature, not a session. */
+const SIGNED_PATHS = new Set(['/api/reminders/reply']);
 const MFA_SETUP_PATHS = new Set(['/api/me', '/api/logout', '/api/account/mfa/start', '/api/account/mfa/confirm', '/api/account/password']);
 const SLA_DAYS: Record<string, number> = { result: 2, message: 2, referral: 5, backfill: 1, chase: 2 };
 
@@ -48,6 +51,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
       return reply.code(e.status).send(outcome(sev, e.status === 404 ? 'not-found' : e.status === 409 ? 'conflict' : 'invalid', e.message, e.alerts ? { alerts: e.alerts } : {}));
     }
     if (e instanceof SearchError) return reply.code(400).send(outcome('error', 'not-supported', e.message));
+    if (e.code === '23505') return reply.code(409).send(outcome('error', 'conflict', 'Someone else saved this at the same moment. Reload and try again.'));
     if (e.statusCode && e.statusCode < 500) return reply.code(e.statusCode).send(outcome('error', 'invalid', e.message));
     console.error(e);
     return reply.code(500).send(outcome('fatal', 'exception', 'Internal error'));
@@ -57,7 +61,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   const mfaRoles = async () => (await getSetting(db, 'security', { mfaRoles: [] as Role[] })).mfaRoles;
   app.addHook('onRequest', async (req, reply) => {
     const path = req.url.split('?')[0];
-    if (!path.startsWith('/api/') && !path.startsWith('/fhir')) return;
+    if ((!path.startsWith('/api/') && !path.startsWith('/fhir')) || SIGNED_PATHS.has(path)) return;
     const bearer = req.headers.authorization?.startsWith('Bearer ') ? req.headers.authorization.slice(7) : undefined;
     const token = bearer ?? req.cookies[COOKIE];
     req.token = token;
@@ -145,17 +149,34 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   const guard = (req: FastifyRequest, action: 'read' | 'write', type: string) => {
     if (!can(req.user!.role, action, type)) throw new store.FhirError(403, `Role ${req.user!.role} cannot ${action} ${type}`);
   };
-  /** Restricted records (meta.security R/V) need a stated reason, which is logged. */
-  const restricted = async (patientId: string | null) => {
-    if (!patientId) return false;
-    const r = (await db.query("select data from resources where type='Patient' and id=$1 and not deleted", [patientId])).rows[0];
-    return !!r?.data.meta?.security?.some((s: any) => s.code === 'R' || s.code === 'V');
+  /**
+   * Restricted records (meta.security R/V) need a stated reason, which is logged. A deleted patient keeps its
+   * labels: deleting the record must not unprotect the data that still points at it.
+   */
+  const restrictedOf = async (ids: (string | null | undefined)[]) => {
+    const want = [...new Set(ids.filter(Boolean))] as string[];
+    if (!want.length) return new Set<string>();
+    return new Set((await db.query(
+      `select id from resources where type='Patient' and id = any($1::text[])
+       and exists (select 1 from jsonb_array_elements(coalesce(data->'meta'->'security', '[]'::jsonb)) l where l->>'code' in ('R','V'))`, [want])).rows.map((r) => r.id as string));
   };
+  const restricted = async (patientId: string | null) => (await restrictedOf([patientId])).size > 0;
+  const givenReason = (req: FastifyRequest) => String(req.headers['x-break-glass-reason'] ?? '').trim();
+  const BREAK_GLASS = 'Restricted record: send X-Break-Glass-Reason (at least 10 characters). The access is logged.';
   const breakGlass = async (req: FastifyRequest, patientId: string | null) => {
     if (!(await restricted(patientId))) return undefined;
-    const reason = String(req.headers['x-break-glass-reason'] ?? '').trim();
-    if (reason.length < 10) throw new store.FhirError(403, 'Restricted record: send X-Break-Glass-Reason (at least 10 characters). The access is logged.');
+    const reason = givenReason(req);
+    if (reason.length < 10) throw new store.FhirError(403, BREAK_GLASS);
     return reason;
+  };
+  /** Drop results that belong to restricted patients unless a reason was given. Checked per result, so no query spelling gets round it. */
+  const screen = async <T>(req: FastifyRequest, rows: T[], owner: (r: T) => string | null) => {
+    const hidden = await restrictedOf(rows.map(owner));
+    if (!hidden.size) return { rows, reason: undefined, hidden: 0 };
+    const reason = givenReason(req);
+    if (reason.length >= 10) return { rows, reason, hidden: 0 };
+    const kept = rows.filter((r) => !hidden.has(owner(r) ?? ''));
+    return { rows: kept, reason: undefined, hidden: rows.length - kept.length };
   };
 
   app.get('/fhir/metadata', async () => ({
@@ -168,21 +189,11 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     const type = typeOf(req); guard(req, 'read', type);
     const query = req.query as Record<string, string | string[]>;
     const { total, resources } = await store.search(db, type, query);
-    const ownerOf = (r: any) => store.patientOf(r);
-    let reason: string | undefined;
-    let out = resources;
     const scoped = (query.patient ?? query.subject) as string | undefined;
-    if (scoped) reason = await breakGlass(req, scoped.replace(/^Patient\//, ''));
-    else if (type !== 'Patient' || true) {
-      const ids = [...new Set(resources.map(ownerOf).filter(Boolean) as string[])];
-      const hidden = new Set<string>();
-      for (const id of ids) if (await restricted(id)) hidden.add(id);
-      if (hidden.size) {
-        const r = String(req.headers['x-break-glass-reason'] ?? '').trim();
-        if (r.length >= 10) reason = r; else out = resources.filter((x) => !hidden.has(ownerOf(x) ?? ''));
-      }
-    }
-    await log(req, 'search', { type, patientId: scoped?.replace(/^Patient\//, ''), detail: { query, returned: out.length }, reason });
+    const { rows: out, reason, hidden } = await screen(req, resources, store.patientOf);
+    // Asking for one patient's data and getting silently less would mislead: say a reason is needed.
+    if (hidden && scoped) throw new store.FhirError(403, BREAK_GLASS);
+    await log(req, 'search', { type, patientId: typeof scoped === 'string' ? scoped.replace(/^Patient\//, '') : null, detail: { query, returned: out.length }, reason });
     return { resourceType: 'Bundle', type: 'searchset', total: out.length === resources.length ? total : out.length, entry: out.map((r) => ({ fullUrl: `${type}/${r.id}`, resource: r })) };
   });
 
@@ -233,12 +244,17 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     body.note = [...(body.note ?? []), { text: `Safety override by ${req.user!.name}: ${reason}`, time: new Date().toISOString() }];
   };
 
+  /** Appointments are checked for clashes inside the same transaction as the write. */
+  const save = (type: string, body: any, write: (q: Db) => Promise<any>, id?: string) =>
+    type === 'Appointment' ? db.tx(async (t) => { store.validate(body, type); await assertFree(t, body, id); return write(t); }) : write(db);
+  const labels = (r: any) => (r?.meta?.security ?? []).map((l: any) => `${l.system ?? ''}|${l.code}`).sort().join(',');
+
   app.post('/fhir/:type', async (req, reply) => {
     const type = typeOf(req); guard(req, 'write', type);
     const body = req.body as any;
     beforeWrite(type, body);
     await medGate(req, body);
-    const res = await store.create(db, type, body);
+    const res = await save(type, body, (q) => store.create(q, type, body));
     await afterWrite(db, type, res, true, req.user!);
     await log(req, 'create', { type, id: res.id, patientId: store.patientOf(res) });
     return reply.code(201).header('location', `/fhir/${type}/${res.id}`).header('etag', store.etag(1)).send(res);
@@ -249,18 +265,28 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     const { id } = req.params as any;
     const body = req.body as any;
     beforeWrite(type, body);
+    const cur = type === 'Patient' ? (await db.query(`select data from resources where type='Patient' and id=$1`, [id])).rows[0]?.data : undefined;
+    let reason: string | undefined, relabelled = false;
+    if (cur) {
+      // Changing a restricted record needs a reason; only clinicians can change who may see it.
+      reason = await breakGlass(req, id);
+      if (req.user!.role !== 'clinician') body.meta = { ...body.meta, security: cur.meta?.security };
+      relabelled = labels(cur) !== labels(body);
+    }
     await medGate(req, body, id);
-    const { res, created } = await store.update(db, type, id, body, store.parseEtag(req.headers['if-match'] as string));
+    const { res, created } = await save(type, body, (q) => store.update(q, type, id, body, store.parseEtag(req.headers['if-match'] as string)), id);
     await afterWrite(db, type, res, created, req.user!);
-    await log(req, created ? 'create' : 'update', { type, id, patientId: store.patientOf(res) });
+    await log(req, created ? 'create' : 'update', { type, id, patientId: store.patientOf(res), reason });
+    if (relabelled) await log(req, 'security-label-change', { type, id, patientId: id, reason, detail: { from: labels(cur), to: labels(res) } });
     return reply.code(created ? 201 : 200).header('etag', store.etag(Number(res.meta.versionId))).send(res);
   });
 
   app.delete('/fhir/:type/:id', async (req, reply) => {
     const type = typeOf(req); need(req, 'admin', 'clinician'); guard(req, 'write', type);
     const { id } = req.params as any;
+    const reason = await breakGlass(req, store.patientOf(await store.read(db, type, id)));
     const old = await store.remove(db, type, id);
-    await log(req, 'delete', { type, id, patientId: store.patientOf(old) });
+    await log(req, 'delete', { type, id, patientId: store.patientOf(old), reason });
     return reply.code(204).send();
   });
 
@@ -282,12 +308,41 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     return { patient, allergies, problems, meds, vitals, labs, appts, referrals, encounters, notes, flags, due };
   });
 
-  app.get('/api/patients/:id/dna-risk', async (req) => {
+  /** The front-desk view of a patient: contact details, appointments and referrals being chased. No clinical content. */
+  app.get('/api/patients/:id/desk', async (req) => {
+    need(req, 'reception', 'clinician', 'nurse');
     const { id } = req.params as any;
+    const patient = await store.read(db, 'Patient', id);
+    const reason = await breakGlass(req, id);
+    const appts = (await store.search(db, 'Appointment', { patient: id, _sort: '-date', _count: '20' })).resources;
+    const referralsOut = await outbound(db, id);
+    await log(req, 'open-desk-record', { type: 'Patient', id, patientId: id, reason });
+    return { patient, appts, referralsOut, remindersOff: !!patient.extension?.some((e: any) => e.url === NO_REMINDERS && e.valueBoolean) };
+  });
+
+  app.get('/api/patients/:id/dna-risk', async (req) => {
+    need(req, 'clinician', 'nurse', 'reception', 'manager');
+    const { id } = req.params as any;
+    await breakGlass(req, id);
     return dnaRisk(db, id, Number((req.query as any).leadDays ?? 0));
   });
 
   // ---------- registration ----------
+  /**
+   * Restricted patients in registration lists. R (restricted) shows only enough to recognise the person, so the
+   * record can be found and opened with a reason; V (very restricted) does not appear at all. A stated reason shows both in full.
+   */
+  const deskList = (req: FastifyRequest, list: any[]) => {
+    const reason = givenReason(req).length >= 10 ? givenReason(req) : undefined;
+    const code = (p: any) => p.meta?.security?.find((l: any) => l.code === 'V' || l.code === 'R')?.code as string | undefined;
+    if (reason) return { rows: list, reason };
+    return {
+      rows: list.filter((p) => code(p) !== 'V').map((p) => (code(p) === 'R'
+        ? { resourceType: 'Patient', id: p.id, name: p.name, birthDate: p.birthDate, gender: p.gender, active: p.active, link: p.link, meta: { security: p.meta.security }, restricted: true }
+        : p)),
+      reason,
+    };
+  };
   app.get('/api/search/patients', async (req) => {
     guard(req, 'read', 'Patient');
     const q = String((req.query as any).q ?? '').trim();
@@ -304,9 +359,10 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     }
     const words = q.toLowerCase().split(/\s+/);
     const rank = (p: any) => words.filter((w) => JSON.stringify([p.name, p.identifier, p.telecom, p.birthDate]).toLowerCase().includes(w)).length;
-    await log(req, 'search-patients', { detail: { q: q.replace(/\w/g, '*') } });
+    const { rows, reason } = deskList(req, [...seen.values()]);
+    await log(req, 'search-patients', { detail: { q: q.replace(/\w/g, '*') }, reason });
     // A merged record is reachable through the record that replaced it, which carries its old identifiers.
-    return [...seen.values()].filter((p) => !p.link?.some((l: any) => l.type === 'replaced-by'))
+    return rows.filter((p) => !p.link?.some((l: any) => l.type === 'replaced-by'))
       .sort((a, b) => rank(b) - rank(a)).slice(0, 25);
   });
 
@@ -321,8 +377,10 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     if (b.phone) await add({ phone: b.phone });
     const me = person({ name: [{ family: b.family, given: [b.given] }], birthDate: b.birthDate, gender: b.gender,
       identifier: b.identifier ? [{ system: 'urn:arogya:mrn', value: b.identifier }] : [], telecom: b.phone ? [{ system: 'phone', value: b.phone }] : [] });
+    const { rows, reason } = deskList(req, [...found.values()]);
+    await log(req, 'check-duplicate', { detail: { candidates: rows.length }, reason });
     // At the desk, warn on weaker evidence than the duplicates worklist uses: a missed duplicate costs more than a second look.
-    return [...found.values()].filter((p) => p.active !== false && !p.link?.some((l: any) => l.type === 'replaced-by'))
+    return rows.filter((p) => p.active !== false && !p.link?.some((l: any) => l.type === 'replaced-by'))
       .map((p) => { const m = score(me, person(p)); return { ...p, score: m.score, why: m.why.join(', ') }; })
       .filter((p) => p.score >= LIKELY - 0.1)
       .sort((x, y) => y.score - x.score).slice(0, 10);
@@ -420,8 +478,35 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   app.get('/api/reminders/outbox', async (req) => {
     need(req, 'admin', 'reception');
     return (await db.query(
-      `select o.id, o.status, o.detail, o.attempts, o.created_at, o.sent_at, o.to_addr, a.data->>'start' as start, a.data->'participant'->0->'actor'->>'display' as patient
+      `select o.id, o.status, o.detail, o.attempts, o.created_at, o.sent_at, o.to_addr, a.data->>'start' as start, a.data->'participant'->0->'actor'->>'display' as patient,
+         (select i.action from inbound i where i.outbox_id=o.id order by i.at desc limit 1) as reply
        from outbox o left join resources a on a.type='Appointment' and a.id=o.appointment_id order by o.created_at desc limit 100`)).rows;
+  });
+  /** Gateway callback with a patient's reply. Signed over the raw body, so this route keeps the body as text. */
+  await app.register(async (hook) => {
+    hook.removeAllContentTypeParsers();
+    hook.addContentTypeParser('*', { parseAs: 'string', bodyLimit: 10_000 }, (_req, body, done) => done(null, body));
+    hook.post('/api/reminders/reply', async (req) => {
+      const raw = String(req.body ?? '');
+      await verifyInbound(db, String(req.headers['x-arogya-timestamp'] ?? ''), raw, String(req.headers['x-arogya-signature'] ?? ''));
+      let b: any;
+      try { b = JSON.parse(raw); } catch { throw new store.FhirError(400, 'Body must be JSON'); }
+      const r = await handleReply(db, b ?? {});
+      await audit(db, { username: 'sms-gateway', action: 'reminder-reply', resourceType: r.appointmentId ? 'Appointment' : undefined, resourceId: r.appointmentId, patientId: r.patientId ?? null, detail: { action: r.action } });
+      return { action: r.action };
+    });
+  });
+  /** Whether this patient gets text reminders. The desk changes it when the patient asks. */
+  app.put('/api/patients/:id/reminders', async (req) => {
+    need(req, 'clinician', 'nurse', 'reception');
+    const { id } = req.params as any;
+    const reason = await breakGlass(req, id);
+    const off = !!(req.body as any)?.off;
+    const p = await store.read(db, 'Patient', id);
+    const extension = [...(p.extension ?? []).filter((e: any) => e.url !== NO_REMINDERS), ...(off ? [{ url: NO_REMINDERS, valueBoolean: true }] : [])];
+    await store.update(db, 'Patient', id, { ...p, extension: extension.length ? extension : undefined });
+    await log(req, 'reminders-preference', { type: 'Patient', id, patientId: id, reason, detail: { off } });
+    return { off };
   });
 
   // ---------- recalls ----------
@@ -444,6 +529,7 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
   app.post('/api/meds/check', async (req) => {
     need(req, 'clinician', 'nurse');
     const b = req.body as { patientId: string; medication: any };
+    await breakGlass(req, b?.patientId ?? null);
     return { alerts: await applyTuning(db, await checkMedication(db, b.patientId, b.medication)) };
   });
 
@@ -519,8 +605,13 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     const { id } = req.params as any;
     const status = String((req.body as any)?.status);
     if (!['arrived', 'fulfilled', 'noshow', 'cancelled', 'booked'].includes(status)) throw new store.FhirError(422, 'Unknown status');
-    const cur = await store.read(db, 'Appointment', id);
-    const { res } = await store.update(db, 'Appointment', id, { ...cur, status, cancelationReason: (req.body as any)?.reason ? { text: (req.body as any).reason } : cur.cancelationReason });
+    const res = await db.tx(async (t) => {
+      const cur = await store.read(t, 'Appointment', id);
+      const next = { ...cur, status, cancelationReason: (req.body as any)?.reason ? { text: (req.body as any).reason } : cur.cancelationReason };
+      // Bringing a cancelled or missed appointment back must not land on top of whoever took the slot since.
+      if (!ACTIVE.includes(cur.status)) await assertFree(t, next, id);
+      return (await store.update(t, 'Appointment', id, next)).res;
+    });
     await afterWrite(db, 'Appointment', res, false, req.user!);
     await log(req, 'update', { type: 'Appointment', id, patientId: store.patientOf(res), detail: { status } });
     return res;
@@ -670,12 +761,27 @@ export async function buildApp(db: Db, opts: { webDir?: string; secureCookies?: 
     return rows;
   });
   app.get('/api/audit/verify', async (req) => { need(req, 'admin'); return verifyChain(db); });
-  app.get('/api/export/:type', async (req, reply) => {
+  app.get('/api/admin/integrity', async (req) => { need(req, 'admin'); return lastIntegrity(db); });
+  app.post('/api/admin/integrity', async (req) => {
     need(req, 'admin');
-    const type = typeOf(req);
-    const rows = (await db.query('select data from resources where type=$1 and not deleted order by id', [type])).rows;
-    await log(req, 'export', { type, detail: { count: rows.length } });
-    return reply.type('application/fhir+ndjson').send(rows.map((r) => JSON.stringify(r.data)).join('\n'));
+    const r = await runIntegrity(db);
+    await log(req, 'integrity-check', { detail: { status: r.status, failed: r.checks.filter((c) => c.status !== 'ok').map((c) => c.key) } });
+    return r;
+  });
+  app.post('/api/admin/integrity/reindex', async (req) => {
+    need(req, 'admin');
+    const r = await rebuildIndex(db);
+    await log(req, 'search-index-rebuild', { detail: r });
+    return r;
+  });
+  /** Bulk NDJSON export: the same read rights as the type itself, two-step verification, and restricted records only with a reason. */
+  app.get('/api/export/:type', async (req, reply) => {
+    const type = typeOf(req); guard(req, 'read', type);
+    if (!req.user!.mfa) throw new store.FhirError(403, 'Turn on two-step verification before exporting records');
+    const all = (await db.query('select data from resources where type=$1 and not deleted order by id', [type])).rows.map((r) => r.data);
+    const { rows, reason, hidden } = await screen(req, all, store.patientOf);
+    await log(req, 'export', { type, detail: { count: rows.length, withheld: hidden }, reason });
+    return reply.type('application/fhir+ndjson').send(rows.map((r) => JSON.stringify(r)).join('\n'));
   });
 
   // ---------- web client ----------

@@ -130,6 +130,9 @@ export async function unmerge(db: Db, logId: string, userId: string) {
     const m = (await t.query('select * from merge_log where id=$1 for update', [logId])).rows[0];
     if (!m) throw new FhirError(404, 'Merge not found');
     if (m.undone_at) throw new FhirError(409, 'This merge was already undone');
+    // If the kept record was itself merged away later, the moved data now sits on a third record: undo that merge first.
+    const later = (await t.query('select id from merge_log where undone_at is null and at > $1 and (merged_id=$2 or keep_id=$3)', [m.at, m.keep_id, m.merged_id])).rows[0];
+    if (later) throw new FhirError(409, 'A later merge involves these records. Undo the most recent merge first.');
     for (const ref of m.moved as string[]) {
       const [type, id] = ref.split('/');
       const cur = (await t.query('select data from resources where type=$1 and id=$2 and not deleted', [type, id])).rows[0];

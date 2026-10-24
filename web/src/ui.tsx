@@ -87,7 +87,8 @@ export function Kpi({ v, l, tone, suffix }: { v: number | null | undefined; l: s
 }
 
 /** Who this is, shown the same way on every clinical screen: name, date of birth, ID, allergies. */
-export function PatientBanner({ p, allergies = [], restricted, extra }: { p: any; allergies?: any[]; restricted?: boolean; extra?: ReactNode }) {
+/** Allergies show only when they were loaded: a view without them must not claim "no known allergies". */
+export function PatientBanner({ p, allergies, restricted, extra }: { p: any; allergies?: any[]; restricted?: boolean; extra?: ReactNode }) {
   const n = fullName(p);
   const initials = n.split(' ').map((w: string) => w[0]).slice(0, 2).join('');
   return (
@@ -102,7 +103,7 @@ export function PatientBanner({ p, allergies = [], restricted, extra }: { p: any
         </div>
       </div>
       <div className="allergy-strip">
-        {allergies.length ? allergies.map((a) => <span key={a.id} className="chip bad"><Icon name="alert" size={12} />{label(a.code)}</span>) : <span className="chip ok">No known allergies recorded</span>}
+        {allergies && (allergies.length ? allergies.map((a) => <span key={a.id} className="chip bad"><Icon name="alert" size={12} />{label(a.code)}</span>) : <span className="chip ok">No known allergies recorded</span>)}
         {extra}
       </div>
     </div>

@@ -4,14 +4,18 @@ import { reindex } from './fhir/store.ts';
 import { decryptWithPassphrase, encryptWithPassphrase } from './secrets.ts';
 
 /** Tables in restore order. search_idx is rebuilt; sessions are never backed up. */
-const TABLES = ['users', 'settings', 'clinic_sessions', 'resources', 'resource_history', 'tasks', 'audit', 'override_log', 'alert_log', 'alert_tuning', 'merge_log', 'not_duplicate', 'outbox'];
+const TABLES = ['users', 'settings', 'clinic_sessions', 'resources', 'resource_history', 'tasks', 'audit', 'override_log', 'alert_log', 'alert_tuning', 'merge_log', 'not_duplicate', 'outbox', 'inbound'];
 const SERIALS: Record<string, string> = { audit: 'seq', override_log: 'id', alert_log: 'id' };
 export const MIN_PASSPHRASE = 12;
 
 export async function backup(db: Db, passphrase: string) {
   if (passphrase.length < MIN_PASSPHRASE) throw new Error(`Backup passphrase must be at least ${MIN_PASSPHRASE} characters`);
   const tables: Record<string, unknown[]> = {};
-  for (const t of TABLES) tables[t] = (await db.query(`select * from ${t}`)).rows;
+  // One snapshot for every table, so a backup taken during clinic hours has no gaps between records and their history.
+  await db.tx(async (q) => {
+    await q.query('set transaction isolation level repeatable read, read only');
+    for (const t of TABLES) tables[t] = (await q.query(`select * from ${t}`)).rows;
+  });
   const body = gzipSync(JSON.stringify({ format: 'arogya-backup', version: 1, at: new Date().toISOString(), tables }));
   return encryptWithPassphrase(body, passphrase);
 }

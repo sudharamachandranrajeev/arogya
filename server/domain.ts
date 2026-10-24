@@ -39,7 +39,7 @@ async function addTask(db: Db, t: { kind: string; patientId: string | null; subj
 const label = (cc: any) => cc?.text ?? cc?.coding?.[0]?.display ?? cc?.coding?.[0]?.code ?? '';
 
 /** Side effects of a stored resource: work lands in the right inbox without anyone forwarding it. */
-export async function afterWrite(db: Db, type: string, res: any, created: boolean, _user: User) {
+export async function afterWrite(db: Db, type: string, res: any, created: boolean, _user?: User) {
   const patientId = patientOf(res);
   if (type === 'Observation' && res.status === 'final' && created) {
     const c = code(res);

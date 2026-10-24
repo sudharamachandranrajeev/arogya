@@ -45,6 +45,7 @@ export function Today({ user }: { user: User }) {
                   <div className="row center" style={{ gap: 8 }}>
                     <Link className="who" to={`/patients/${a.patientId}${a.status === 'arrived' ? `?appt=${a.id}` : ''}`}>{a.patientName || 'Unnamed patient'}</Link>
                     <span className={`chip ${tone}`}>{st}</span>
+                    {a.status === 'booked' && a.confirmed && <span className="chip ok" title={`Confirmed by text ${time(a.confirmed)}`}><Icon name="check" size={12} />Confirmed</span>}
                     {a.allergies > 0 && <span className="chip bad"><Icon name="alert" size={12} />{a.allergies} allerg{a.allergies > 1 ? 'ies' : 'y'}</span>}
                     {a.status === 'booked' && a.dnaRisk && a.dnaRisk.risk >= 0.3 && <span className="chip warn" title={a.dnaRisk.reasons.join('; ')}>No-show risk {Math.round(a.dnaRisk.risk * 100)}%</span>}
                   </div>

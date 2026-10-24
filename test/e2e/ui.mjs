@@ -107,10 +107,23 @@ await r.waitForSelector('.toast:has-text("Acknowledged recorded")');
 await ref.locator('text=Waiting for an appointment').waitFor();
 step('quiet referral chased and acknowledged');
 
+// Reception opens the patient: the desk view, without clinical content, and turns text reminders off.
+await ref.locator('a').first().click();
+await r.waitForSelector('h3:has-text("Contact")');
+assert.equal(await r.locator('text=No known allergies').count(), 0, 'desk view must not claim allergy status');
+await r.click('button:has-text("Turn reminders off")');
+await r.waitForSelector('.toast:has-text("Text reminders turned off")');
+await r.waitForSelector('button:has-text("Turn reminders on")');
+step('reception desk record and reminder preference');
+
 // Nurse: forced two-step enrolment end to end.
 const a = await page();
 await signIn(a, 'admin');
 await a.goto(base + '/admin', { waitUntil: 'networkidle' });
+await a.click('button:has-text("Run check now")');
+await a.waitForSelector('.check.ok >> text=Search index');
+assert.equal(await a.locator('.check.fail').count(), 0, 'demo data passes the integrity check');
+step('integrity check runs clean on the demo data');
 await a.check('label:has-text("nurse") input');
 await a.click('button:has-text("Save policy")');
 await a.waitForSelector('.toast:has-text("Security policy saved")');

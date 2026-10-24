@@ -19,6 +19,9 @@ export class FhirError extends Error {
   }
 }
 
+/** A FHIR instant: full date-time with seconds optional and a zone. Scheduling compares these as timestamps. */
+const instant = (v: unknown) => typeof v === 'string' && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:\d{2})$/.test(v) && !Number.isNaN(Date.parse(v));
+
 /** Minimal structural validation: enough to refuse data that downstream rules rely on. */
 const REQUIRED: Record<string, (r: any) => string | null> = {
   Patient: (r) => (r.name?.length || r.identifier?.length ? null : 'Patient needs a name or identifier'),
@@ -26,7 +29,9 @@ const REQUIRED: Record<string, (r: any) => string | null> = {
   Condition: (r) => (!r.code ? 'Condition.code required' : !r.subject ? 'Condition.subject required' : null),
   AllergyIntolerance: (r) => (!r.code ? 'AllergyIntolerance.code required' : !r.patient ? 'AllergyIntolerance.patient required' : null),
   MedicationRequest: (r) => (!r.status || !r.intent ? 'MedicationRequest.status and intent required' : !(r.medicationCodeableConcept) ? 'MedicationRequest.medicationCodeableConcept required' : !r.subject ? 'MedicationRequest.subject required' : null),
-  Appointment: (r) => (!r.status ? 'Appointment.status required' : !r.start || !r.end ? 'Appointment start and end required' : null),
+  Appointment: (r) => (!r.status ? 'Appointment.status required' : !r.start || !r.end ? 'Appointment start and end required'
+    : !instant(r.start) || !instant(r.end) ? 'Appointment start and end must be date-times with a time zone, e.g. 2026-11-02T09:00:00+00:00'
+    : Date.parse(r.end) < Date.parse(r.start) ? 'Appointment end cannot be before start' : null),
   ServiceRequest: (r) => (!r.status || !r.intent ? 'ServiceRequest.status and intent required' : !r.subject ? 'ServiceRequest.subject required' : null),
   Encounter: (r) => (!r.status ? 'Encounter.status required' : !r.subject ? 'Encounter.subject required' : null),
   Composition: (r) => (!r.status || !r.title ? 'Composition.status and title required' : !r.subject ? 'Composition.subject required' : null),
@@ -41,7 +46,8 @@ export function validate(res: any, type: string) {
 /** The Patient a resource belongs to, for audit and break-glass. */
 export function patientOf(res: any): string | null {
   if (res.resourceType === 'Patient') return res.id ?? null;
-  const ref = res.subject?.reference ?? res.patient?.reference ?? res.beneficiary?.reference;
+  const ref = res.subject?.reference ?? res.patient?.reference ?? res.beneficiary?.reference ?? res.for?.reference
+    ?? res.participant?.map((p: any) => p.actor?.reference).find((r: unknown) => typeof r === 'string' && r.startsWith('Patient/'));
   return typeof ref === 'string' && ref.startsWith('Patient/') ? ref.slice(8) : null;
 }
 
@@ -67,14 +73,17 @@ function stamp(res: any, id: string, version: number, at: string) {
   return res;
 }
 
-export async function create(q: Db, type: string, body: any, id: string = randomUUID()) {
+/** Writes are atomic: the current row, its history entry and its search index change together or not at all. */
+export async function create(db: Db, type: string, body: any, id: string = randomUUID()) {
   validate(body, type);
-  const at = new Date().toISOString();
-  const res = stamp({ ...body }, id, 1, at);
-  await q.query('insert into resources(type,id,version,data,last_updated) values ($1,$2,1,$3,$4)', [type, id, res, at]);
-  await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,1,$3,false,$4,'create')", [type, id, res, at]);
-  await reindex(q, type, id, res);
-  return res;
+  return db.tx(async (q) => {
+    const at = new Date().toISOString();
+    const res = stamp({ ...body }, id, 1, at);
+    await q.query('insert into resources(type,id,version,data,last_updated) values ($1,$2,1,$3,$4)', [type, id, res, at]);
+    await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,1,$3,false,$4,'create')", [type, id, res, at]);
+    await reindex(q, type, id, res);
+    return res;
+  });
 }
 
 export async function read(q: Db, type: string, id: string) {
@@ -84,30 +93,34 @@ export async function read(q: Db, type: string, id: string) {
   return r.data;
 }
 
-export async function update(q: Db, type: string, id: string, body: any, ifMatch?: number) {
+export async function update(db: Db, type: string, id: string, body: any, ifMatch?: number) {
   validate(body, type);
   if (body.id && body.id !== id) throw new FhirError(400, 'id in body does not match URL');
-  const cur = (await q.query('select version, deleted from resources where type=$1 and id=$2 for update', [type, id])).rows[0];
-  if (!cur) return { res: await create(q, type, body, id), created: true };
-  if (ifMatch !== undefined && ifMatch !== cur.version) throw new FhirError(412, `Version conflict: current is ${cur.version}`);
-  const v = cur.version + 1;
-  const at = new Date().toISOString();
-  const res = stamp({ ...body }, id, v, at);
-  await q.query('update resources set version=$3, data=$4, deleted=false, last_updated=$5 where type=$1 and id=$2', [type, id, v, res, at]);
-  await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,$3,$4,false,$5,'update')", [type, id, v, res, at]);
-  await reindex(q, type, id, res);
-  return { res, created: false };
+  return db.tx(async (q) => {
+    const cur = (await q.query('select version, deleted from resources where type=$1 and id=$2 for update', [type, id])).rows[0];
+    if (!cur) return { res: await create(q, type, body, id), created: true };
+    if (ifMatch !== undefined && ifMatch !== cur.version) throw new FhirError(412, `Version conflict: current is ${cur.version}`);
+    const v = cur.version + 1;
+    const at = new Date().toISOString();
+    const res = stamp({ ...body }, id, v, at);
+    await q.query('update resources set version=$3, data=$4, deleted=false, last_updated=$5 where type=$1 and id=$2', [type, id, v, res, at]);
+    await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,$3,$4,false,$5,'update')", [type, id, v, res, at]);
+    await reindex(q, type, id, res);
+    return { res, created: false };
+  });
 }
 
-export async function remove(q: Db, type: string, id: string) {
-  const cur = (await q.query('select version, data from resources where type=$1 and id=$2 for update', [type, id])).rows[0];
-  if (!cur) throw new FhirError(404, `${type}/${id} not found`);
-  const v = cur.version + 1;
-  const at = new Date().toISOString();
-  await q.query('update resources set version=$3, deleted=true, last_updated=$4 where type=$1 and id=$2', [type, id, v, at]);
-  await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,$3,$4,true,$5,'delete')", [type, id, v, cur.data, at]);
-  await q.query('delete from search_idx where type=$1 and id=$2', [type, id]);
-  return cur.data;
+export async function remove(db: Db, type: string, id: string) {
+  return db.tx(async (q) => {
+    const cur = (await q.query('select version, data from resources where type=$1 and id=$2 for update', [type, id])).rows[0];
+    if (!cur) throw new FhirError(404, `${type}/${id} not found`);
+    const v = cur.version + 1;
+    const at = new Date().toISOString();
+    await q.query('update resources set version=$3, deleted=true, last_updated=$4 where type=$1 and id=$2', [type, id, v, at]);
+    await q.query("insert into resource_history(type,id,version,data,deleted,last_updated,op) values ($1,$2,$3,$4,true,$5,'delete')", [type, id, v, cur.data, at]);
+    await q.query('delete from search_idx where type=$1 and id=$2', [type, id]);
+    return cur.data;
+  });
 }
 
 export async function history(q: Db, type: string, id: string) {
