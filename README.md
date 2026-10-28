@@ -14,6 +14,7 @@
   <img src="https://img.shields.io/badge/FHIR-R4-e8572a" alt="FHIR R4">
   <img src="https://img.shields.io/badge/Node.js-24%2B-5fa04e?logo=nodedotjs&logoColor=white" alt="Node.js 24+">
   <img src="https://img.shields.io/badge/PostgreSQL-or%20embedded%20PGlite-336791?logo=postgresql&logoColor=white" alt="PostgreSQL">
+  <a href="https://github.com/sudharamachandranrajeev/brahma"><img src="https://img.shields.io/badge/part%20of-Brahma-8a5cf6" alt="Part of Brahma"></a>
 </p>
 
 <p align="center">
