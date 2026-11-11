@@ -1,6 +1,6 @@
 <h1 align="center">
   <br>
-  <a href="https://github.com/sudharamachandranrajeev/arogya"><img src="docs/logo.svg" alt="Arogya" width="140"></a>
+  <a href="https://github.com/sudharamachandranrajeev/arogya-health-records-ehr"><img src="docs/logo.svg" alt="Arogya" width="140"></a>
   <br>
   Arogya
   <br>
@@ -9,10 +9,10 @@
 <h4 align="center">A health record system for small clinics: the day's patients, charts, results, referrals and reminders, on your own server.</h4>
 
 <p align="center">
-  <a href="https://github.com/sudharamachandranrajeev/arogya/releases"><img src="https://img.shields.io/github/v/release/sudharamachandranrajeev/arogya?include_prereleases&color=0d7a6f&label=download" alt="Latest release"></a>
+  <a href="https://github.com/sudharamachandranrajeev/arogya-health-records-ehr/releases"><img src="https://img.shields.io/github/v/release/sudharamachandranrajeev/arogya-health-records-ehr?include_prereleases&color=0d7a6f&label=download" alt="Latest release"></a>
   <img src="https://img.shields.io/badge/runs%20on-Linux%20%7C%20macOS%20%7C%20Windows%20%7C%20Docker-555" alt="Runs on Linux, macOS, Windows and Docker">
   <a href="LICENSE"><img src="https://img.shields.io/badge/licence-AGPL--3.0-0d7a6f" alt="Licence AGPL-3.0"></a>
-  <a href="https://github.com/sudharamachandranrajeev/brahma"><img src="https://img.shields.io/badge/part%20of-Brahma-8a5cf6" alt="Part of Brahma"></a>
+  <a href="https://github.com/sudharamachandranrajeev/brahma-life-suite"><img src="https://img.shields.io/badge/part%20of-Brahma-8a5cf6" alt="Part of Brahma"></a>
 </p>
 
 <p align="center">
@@ -113,7 +113,7 @@ These steps run Arogya with a made-up demo clinic, so you can look around safely
 
 1. Install [Node.js](https://nodejs.org) **24 or newer** (the free program that runs Arogya). To
    check, open a terminal and type `node --version`.
-2. Open the [releases page](https://github.com/sudharamachandranrajeev/arogya/releases) and, under
+2. Open the [releases page](https://github.com/sudharamachandranrajeev/arogya-health-records-ehr/releases) and, under
    the newest release, download the file for your computer:
 
 | Your computer | File to download | Works on |
@@ -257,7 +257,7 @@ yourself.
 You need [Git](https://git-scm.com) and [Node.js](https://nodejs.org) 24 or newer.
 
 ```bash
-git clone https://github.com/sudharamachandranrajeev/arogya
+git clone https://github.com/sudharamachandranrajeev/arogya-health-records-ehr
 cd arogya
 npm ci && npm run build
 AROGYA_DEMO=1 npm start      # demo clinic on http://127.0.0.1:8080
@@ -303,7 +303,7 @@ Arogya sits alongside the **Brahma** family of self-hosted apps.
 
 | Link | What it is |
 | --- | --- |
-| [brahma](https://github.com/sudharamachandranrajeev/brahma) | The shared core and the all-in-one app |
+| [brahma](https://github.com/sudharamachandranrajeev/brahma-life-suite) | The shared core and the all-in-one app |
 | [docs/ROADMAP.md](docs/ROADMAP.md) | What is done and what comes next |
 | [SECURITY.md](SECURITY.md) | Security model and how to report a vulnerability |
 
